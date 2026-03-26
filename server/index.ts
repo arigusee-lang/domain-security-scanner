@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { rateLimiter } from "./middleware/rateLimit.js";
 import { validateRequest } from "./middleware/validateRequest.js";
 import fetchRoute from "./routes/fetch.js";
+import domainCheckRoute from "./routes/domainCheck.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === "production";
@@ -16,7 +17,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 // Gzip/brotli compression for all responses
 app.use(compression());
 
-// CORS — only needed in dev (in prod, frontend is served from same origin)
+// CORS ï¿½ only needed in dev (in prod, frontend is served from same origin)
 if (!isProduction) {
   app.use(
     cors({
@@ -38,6 +39,9 @@ app.use("/api", rateLimiter);
 
 // Fetch endpoint with domain validation
 app.use("/api/fetch", validateRequest, fetchRoute);
+
+// Domain check endpoint with domain validation
+app.use("/api/domain-check", validateRequest, domainCheckRoute);
 
 // In production, serve the built frontend
 if (isProduction) {

@@ -186,3 +186,87 @@ export async function safeFetch(domain: string): Promise<ProxyFetchResponse | Pr
     fallbackUsed,
   };
 }
+
+import https from "node:https";
+import tls from "node:tls";
+import type { SafeFetchWithHeadersResponse } from "../types.js";
+import type { TlsCertInfo } from "../types.js";
+
+/**
+ * Connects to the domain via TLS and extracts the peer certificate.
+ */
+function extractTlsCert(hostname: string, timeoutMs: number): Promise<TlsCertInfo | null> {
+  return new Promise((resolve) => {
+    const socket = tls.connect({ host: hostname, port: 443, servername: hostname, timeout: timeoutMs, rejectUnauthorized: false }, () => {
+      const cert = socket.getPeerCertificate();
+      socket.destroy();
+      if (!cert || !cert.valid_from) { resolve(null); return; }
+      const validFrom = new Date(cert.valid_from).toISOString();
+      const validTo = new Date(cert.valid_to).toISOString();
+      const daysRemaining = Math.floor((new Date(cert.valid_to).getTime() - Date.now()) / 86400000);
+      const sans: string[] = cert.subjectaltname
+        ? cert.subjectaltname.split(",").map((s: string) => s.trim().replace(/^DNS:/, ""))
+        : [];
+      resolve({
+        issuer: String(cert.issuer?.O || cert.issuer?.CN || "Unknown"),
+        subject: String(cert.subject?.CN || "Unknown"),
+        validFrom,
+        validTo,
+        daysRemaining,
+        sans,
+      });
+    });
+    socket.on("error", () => { socket.destroy(); resolve(null); });
+    socket.on("timeout", () => { socket.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * SSRF-safe fetch that also captures HTTP response headers and TLS certificate info.
+ * Used by the domain check API to avoid a second HTTP request.
+ */
+export async function safeFetchWithHeaders(
+  domain: string,
+  timeoutMs: number = 8000
+): Promise<SafeFetchWithHeadersResponse | ProxyFetchError> {
+  // Run TLS cert extraction in parallel with the normal fetch
+  const [fetchResult, tlsCert] = await Promise.all([
+    safeFetch(domain),
+    extractTlsCert(domain, timeoutMs),
+  ]);
+
+  if (!fetchResult.success) {
+    return fetchResult;
+  }
+
+  // Fetch security headers from the domain's root page (not security.txt)
+  let responseHeaders: Record<string, string> = {};
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const headRes = await fetch(`https://${domain}/`, {
+      method: "HEAD",
+      signal: controller.signal,
+      redirect: "follow",
+      headers: { "User-Agent": "security-txt-validator/1.0" },
+    });
+    clearTimeout(timer);
+    headRes.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+  } catch {
+    // Headers extraction is best-effort
+  }
+
+  return {
+    success: true,
+    content: fetchResult.content,
+    contentType: fetchResult.contentType,
+    fetchedFrom: fetchResult.fetchedFrom,
+    redirectChain: fetchResult.redirectChain,
+    wellKnownFound: fetchResult.wellKnownFound,
+    fallbackUsed: fetchResult.fallbackUsed,
+    responseHeaders,
+    tlsCert,
+  };
+}
