@@ -107,6 +107,12 @@ async function fetchWithProtection(
     throw { error: "http_error" as const, message: `HTTP ${response.status}`, httpStatus: response.status };
   }
 
+  // Check Content-Type early — reject HTML/non-text responses before reading body
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType && !contentType.includes("text/plain")) {
+    throw { error: "invalid_content_type" as const, message: `Expected text/plain, got ${contentType.split(";")[0].trim()}` };
+  }
+
   // Read body with size limit
   const reader = response.body?.getReader();
   if (!reader) {
@@ -129,7 +135,6 @@ async function fetchWithProtection(
 
   const decoder = new TextDecoder();
   const body = chunks.map((c) => decoder.decode(c, { stream: true })).join("") + decoder.decode();
-  const contentType = response.headers.get("content-type") || "";
 
   return { body, contentType, finalUrl: url, redirectChain };
 }
@@ -147,10 +152,10 @@ export async function safeFetch(domain: string): Promise<ProxyFetchResponse | Pr
   let wellKnownFound = true;
   let fallbackUsed = false;
 
+  // Also handle invalid_content_type from fetchWithProtection as "not a security.txt"
   try {
     result = await fetchWithProtection(wellKnownUrl, [], 0);
   } catch (err: any) {
-    // If it's a 404, try fallback
     if (err?.error === "http_error" && err?.httpStatus === 404) {
       wellKnownFound = false;
       fallbackUsed = true;
@@ -160,19 +165,31 @@ export async function safeFetch(domain: string): Promise<ProxyFetchResponse | Pr
         if (fallbackErr?.error === "http_error" && fallbackErr?.httpStatus === 404) {
           return { success: false, error: "not_found", message: "No security.txt file found." };
         }
+        if (fallbackErr?.error === "invalid_content_type") {
+          return { success: false, error: "not_found", message: "No security.txt file found (server returned HTML instead)." };
+        }
         return toProxyError(fallbackErr);
+      }
+    } else if (err?.error === "invalid_content_type") {
+      // Well-known returned non-text, try fallback
+      wellKnownFound = false;
+      fallbackUsed = true;
+      try {
+        result = await fetchWithProtection(fallbackUrl, [], 0);
+      } catch (fallbackErr: any) {
+        return { success: false, error: "not_found", message: "No security.txt file found (server returned HTML instead)." };
       }
     } else {
       return toProxyError(err);
     }
   }
 
-  // Verify Content-Type
+  // Safety net: verify Content-Type (should already be checked in fetchWithProtection)
   if (!result.contentType.includes("text/plain")) {
     return {
       success: false,
       error: "invalid_content_type",
-      message: "Expected text/plain content type.",
+      message: `Expected text/plain, got ${result.contentType.split(";")[0].trim() || "unknown"}`,
     };
   }
 

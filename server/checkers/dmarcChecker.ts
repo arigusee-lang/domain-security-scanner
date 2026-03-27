@@ -43,13 +43,12 @@ export async function checkDmarc(domain: string, timeout: number = 5000): Promis
   }
 
   const validations: DmarcValidationItem[] = [];
+  const DMARC_RFC = "https://www.rfc-editor.org/rfc/rfc7489";
 
   if (dmarcRecords.length > 1) {
-    validations.push({ check: "Single record", status: "fail", detail: `${dmarcRecords.length} DMARC records found — must have exactly one` });
+    validations.push({ check: "Single record", status: "fail", detail: `${dmarcRecords.length} DMARC records found — must have exactly one`, ref: DMARC_RFC + "#section-6.6.3" });
     return { status: "fail", record: dmarcRecords[0], validations, tags: [] };
   }
-
-  const DMARC_RFC = "https://www.rfc-editor.org/rfc/rfc7489";
 
   const record = dmarcRecords[0];
   validations.push({ check: "DMARC record found", status: "pass", detail: "v=DMARC1 record published", ref: DMARC_RFC });
@@ -71,15 +70,15 @@ export async function checkDmarc(domain: string, timeout: number = 5000): Promis
   // Validate p tag
   const policy = tagMap.get("p");
   if (!policy) {
-    validations.push({ check: "Policy (p)", status: "fail", detail: "Required 'p' tag is missing" });
+    validations.push({ check: "Policy (p)", status: "fail", detail: "Required 'p' tag is missing", ref: DMARC_RFC + "#section-6.3" });
   } else if (policy === "none") {
-    validations.push({ check: "Policy (p)", status: "warn", detail: "p=none — monitoring only, no enforcement" });
+    validations.push({ check: "Policy (p)", status: "warn", detail: "p=none — monitoring only, no enforcement", ref: DMARC_RFC + "#section-6.3" });
   } else if (policy === "quarantine") {
-    validations.push({ check: "Policy (p)", status: "pass", detail: "p=quarantine — suspicious messages quarantined" });
+    validations.push({ check: "Policy (p)", status: "pass", detail: "p=quarantine — suspicious messages quarantined", ref: DMARC_RFC + "#section-6.3" });
   } else if (policy === "reject") {
-    validations.push({ check: "Policy (p)", status: "pass", detail: "p=reject — unauthorized messages rejected" });
+    validations.push({ check: "Policy (p)", status: "pass", detail: "p=reject — unauthorized messages rejected", ref: DMARC_RFC + "#section-6.3" });
   } else {
-    validations.push({ check: "Policy (p)", status: "warn", detail: `Unknown policy value: ${policy}` });
+    validations.push({ check: "Policy (p)", status: "warn", detail: `Unknown policy value: ${policy}`, ref: DMARC_RFC + "#section-6.3" });
   }
 
   // Validate rua

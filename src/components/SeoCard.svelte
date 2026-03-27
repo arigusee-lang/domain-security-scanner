@@ -15,7 +15,7 @@
   {:else}
     <div class="items-stack">
       {#each data.items as item}
-        <CheckItem status={item.status} title={item.check} detail={item.detail} />
+        <CheckItem status={item.status} title={item.check} detail={item.detail} ref={item.ref || ''} />
       {/each}
     </div>
   {/if}
@@ -23,5 +23,5 @@
 
 <style>
   .error-text { color: var(--color-error); font-size: 0.85rem; }
-  .items-stack { display: flex; flex-direction: column; gap: 0.4rem; }
+  .items-stack { display: flex; flex-direction: column; gap: 0.35rem; }
 </style>

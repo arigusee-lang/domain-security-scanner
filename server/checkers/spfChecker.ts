@@ -33,13 +33,13 @@ export async function checkSpf(domain: string, timeout: number = 5000): Promise<
     if (err.message === "timeout") {
       return { status: "fail", record: null, validations: [], mechanisms: [], dnsLookupCount: 0, error: "DNS lookup timed out" };
     }
-    return { status: "fail", record: null, validations: [{ check: "SPF record", status: "fail", detail: "No SPF record found" }], mechanisms: [], dnsLookupCount: 0 };
+    return { status: "fail", record: null, validations: [{ check: "SPF record", status: "fail", detail: "No SPF record found", ref: "https://www.rfc-editor.org/rfc/rfc7208" }], mechanisms: [], dnsLookupCount: 0 };
   }
 
   const spfRecords = txtRecords.map(r => r.join("")).filter(r => r.toLowerCase().startsWith("v=spf1"));
 
   if (spfRecords.length === 0) {
-    return { status: "fail", record: null, validations: [{ check: "SPF record", status: "fail", detail: "No SPF record published" }], mechanisms: [], dnsLookupCount: 0 };
+    return { status: "fail", record: null, validations: [{ check: "SPF record", status: "fail", detail: "No SPF record published", ref: "https://www.rfc-editor.org/rfc/rfc7208" }], mechanisms: [], dnsLookupCount: 0 };
   }
 
   const validations: SpfValidationItem[] = [];
@@ -83,16 +83,16 @@ export async function checkSpf(domain: string, timeout: number = 5000): Promise<
   if (allMech) {
     const qualifier = allMech.startsWith("+") || allMech === "all" ? "+" : allMech[0];
     if (qualifier === "+") {
-      validations.push({ check: "all mechanism", status: "fail", detail: "+all — allows any server to send email (too permissive)", ref: SPF_RFC + "#section-5.1" });
+      validations.push({ check: "Catch-all policy", status: "fail", detail: "+all — allows any server to send email (too permissive)", ref: SPF_RFC + "#section-5.1" });
     } else if (qualifier === "-") {
-      validations.push({ check: "all mechanism", status: "pass", detail: "-all — strict policy, unauthorized senders rejected", ref: SPF_RFC + "#section-5.1" });
+      validations.push({ check: "Catch-all policy", status: "pass", detail: "-all — strict policy, unauthorized senders rejected", ref: SPF_RFC + "#section-5.1" });
     } else if (qualifier === "~") {
-      validations.push({ check: "all mechanism", status: "warn", detail: "~all — softfail, unauthorized senders marked but not rejected", ref: SPF_RFC + "#section-5.1" });
+      validations.push({ check: "Catch-all policy", status: "warn", detail: "~all — softfail, unauthorized senders marked but not rejected", ref: SPF_RFC + "#section-5.1" });
     } else if (qualifier === "?") {
-      validations.push({ check: "all mechanism", status: "warn", detail: "?all — neutral, no policy assertion", ref: SPF_RFC + "#section-5.1" });
+      validations.push({ check: "Catch-all policy", status: "warn", detail: "?all — neutral, no policy assertion", ref: SPF_RFC + "#section-5.1" });
     }
   } else {
-    validations.push({ check: "all mechanism", status: "warn", detail: "No 'all' mechanism found — implicit ?all", ref: SPF_RFC + "#section-5.1" });
+    validations.push({ check: "Catch-all policy", status: "warn", detail: "No 'all' mechanism found — implicit ?all", ref: SPF_RFC + "#section-5.1" });
   }
 
   // Sort: fail first, then warn, then pass

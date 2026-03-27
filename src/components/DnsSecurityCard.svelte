@@ -26,7 +26,11 @@
   <!-- DNSSEC -->
   <section class="sub-section">
     <h4 class="sub-title"><CheckStatusIcon status={dnssec.status} /> DNSSEC</h4>
-    <p class="sub-detail">{dnssec.enabled ? 'Enabled — DS records found' : 'Not enabled'}</p>
+    {#if dnssec.enabled}
+      <p class="sub-detail">Enabled — DNS responses are cryptographically signed</p>
+    {:else}
+      <p class="sub-detail">Not enabled — DNS responses are not signed, which makes the domain more susceptible to DNS spoofing. HTTPS mitigates this for web traffic, but email (MX) and other DNS records remain unprotected.</p>
+    {/if}
     {#if dnssec.error}<p class="error-text">{dnssec.error}</p>{/if}
   </section>
 
@@ -34,13 +38,14 @@
   <section class="sub-section">
     <h4 class="sub-title"><CheckStatusIcon status={caa.status} /> CAA Records</h4>
     {#if caa.records.length > 0}
+      <p class="sub-hint">Only the listed Certificate Authorities are allowed to issue SSL certificates for this domain.</p>
       <div class="caa-list">
         {#each caa.records as r}
           <div class="caa-row"><code>{r.tag}</code> <span>{r.value}</span></div>
         {/each}
       </div>
     {:else}
-      <p class="sub-detail">No CAA records — any CA can issue certificates for this domain.</p>
+      <p class="sub-detail">No CAA records configured. Any Certificate Authority can issue SSL certificates for this domain. This is common — CAA is an optional extra layer of control over certificate issuance.</p>
     {/if}
     {#if caa.error}<p class="error-text">{caa.error}</p>{/if}
   </section>
@@ -122,6 +127,14 @@
   .sub-detail {
     font-size: 0.8rem;
     color: var(--color-text-secondary);
+    line-height: 1.5;
+  }
+
+  .sub-hint {
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    opacity: 0.7;
+    margin-bottom: 0.3rem;
   }
 
   .error-text {

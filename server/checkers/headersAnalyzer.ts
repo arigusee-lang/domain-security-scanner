@@ -32,7 +32,7 @@ export function analyzeHeaders(headers: Record<string, string>): HeadersResult {
   const csp = headers["content-security-policy"];
   items.push(csp
     ? { name: "Content-Security-Policy", present: true, value: csp.length > 80 ? csp.slice(0, 80) + "…" : csp, status: "pass", explanation: "CSP is configured", ref: REFS["Content-Security-Policy"] }
-    : { name: "Content-Security-Policy", present: false, value: "missing", status: "fail", explanation: "No CSP — site is more vulnerable to XSS attacks", ref: REFS["Content-Security-Policy"] }
+    : { name: "Content-Security-Policy", present: false, value: "missing", status: "warn", explanation: "No CSP — recommended browser-side XSS protection is not configured", ref: REFS["Content-Security-Policy"] }
   );
 
   const xcto = headers["x-content-type-options"];

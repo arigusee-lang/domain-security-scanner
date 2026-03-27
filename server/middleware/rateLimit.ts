@@ -1,11 +1,14 @@
 import rateLimit from "express-rate-limit";
 
+const isProduction = process.env.NODE_ENV === "production";
+
 /**
- * Rate limiter: 20 requests per minute per client IP.
+ * Rate limiter: 40 requests per minute per client IP in production,
+ * 200 in development for testing.
  */
 export const rateLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 20,
+  windowMs: 60 * 1000,
+  max: isProduction ? 40 : 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: {

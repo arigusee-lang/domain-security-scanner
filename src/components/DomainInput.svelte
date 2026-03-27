@@ -1,10 +1,12 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
-  const dispatch = createEventDispatcher<{ check: { domain: string } }>();
+  const dispatch = createEventDispatcher<{ check: { domain: string; noCache: boolean } }>();
 
   let domain = '';
   let error = '';
+  let noCache = false;
+  const isDev = window.location.hostname === 'localhost';
 
   export function setDomain(d: string) {
     domain = d;
@@ -18,7 +20,7 @@
       return;
     }
     domain = trimmed;
-    dispatch('check', { domain: trimmed });
+    dispatch('check', { domain: trimmed, noCache });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -40,6 +42,12 @@
     />
     <button class="check-btn" on:click={handleSubmit}>Check</button>
   </div>
+  {#if isDev}
+    <label class="dev-toggle">
+      <input type="checkbox" bind:checked={noCache} />
+      <span>Skip cache (dev)</span>
+    </label>
+  {/if}
   {#if error}
     <p class="error-msg" role="alert">{error}</p>
   {/if}
@@ -104,5 +112,20 @@
   .error-msg {
     color: var(--color-error);
     font-size: 0.8rem;
+  }
+
+  .dev-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.7rem;
+    color: var(--color-text-secondary);
+    opacity: 0.6;
+    cursor: pointer;
+  }
+
+  .dev-toggle input {
+    accent-color: var(--color-accent);
+    cursor: pointer;
   }
 </style>

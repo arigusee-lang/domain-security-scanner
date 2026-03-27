@@ -102,7 +102,9 @@
         {/each}
       </div>
     {/if}
-    <p class="dkim-note">Partial check — common selectors only. Custom selectors may exist.</p>
+    <p class="dkim-note">Partial check — common selectors only. Custom selectors may exist.
+      <a class="ref-link" href="https://www.rfc-editor.org/rfc/rfc6376" target="_blank" rel="noopener noreferrer">RFC 6376 <svg class="ext-icon" width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3.5 1H11V8.5M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+    </p>
   </section>
 
   <!-- MX -->
@@ -151,6 +153,9 @@
   .sel-service { color: var(--color-text-secondary); opacity: 0.7; }
   .sel-status { margin-left: auto; font-size: 0.7rem; }
   .dkim-note { font-size: 0.7rem; color: var(--color-text-secondary); opacity: 0.6; margin-top: 0.3rem; }
+  .ref-link { display: inline-flex; align-items: center; gap: 0.15rem; color: var(--color-accent); text-decoration: none; opacity: 0.75; font-size: 0.7rem; }
+  .ref-link:hover { opacity: 1; text-decoration: underline; }
+  .ext-icon { flex-shrink: 0; }
   .mx-table-wrap { overflow-x: auto; }
   .mx-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
   .mx-table th { text-align: left; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-secondary); padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--color-border); }

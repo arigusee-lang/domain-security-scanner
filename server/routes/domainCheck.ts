@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { safeFetchWithHeaders } from "../lib/safeFetch.js";
+import { cacheGet, cacheSet } from "../lib/cache.js";
 import { analyzeHeaders } from "../checkers/headersAnalyzer.js";
 import { checkSpf } from "../checkers/spfChecker.js";
 import { checkDmarc } from "../checkers/dmarcChecker.js";
@@ -19,149 +20,163 @@ import { checkUrlhaus } from "../checkers/urlhausChecker.js";
 import { checkDanglingDns } from "../checkers/danglingDnsChecker.js";
 import { parse } from "../../src/lib/parser.js";
 import { validate } from "../../src/lib/validator.js";
-import type {
-  DomainCheckResponse,
-  SecurityTxtSection,
-  HeadersResult,
-  SpfResult,
-  DmarcResult,
-  DkimResult,
-  DnssecResult,
-  CaaResult,
-  MxResult,
-  NsResult,
-  SslResult,
-  DomainExpiryResult,
-  BlacklistResult,
-  CtLogsResult,
-  RedirectResult,
-  SeoResult,
-  SafeBrowsingResult,
-  UrlhausResult,
-  DanglingDnsResult,
-  SafeFetchWithHeadersResponse,
-} from "../types.js";
+import type { SafeFetchWithHeadersResponse } from "../types.js";
 
 const router = Router();
-const DNS_TIMEOUT = 5000;
-const HTTP_TIMEOUT = 8000;
+const DNS_TIMEOUT = 8000;
+const HTTP_TIMEOUT = 15000;
+const CACHE_TTL = 5 * 60 * 1000;
 
-router.get("/", async (req, res) => {
+/** Helper: run a checker with caching */
+async function cached<T>(key: string, noCache: boolean, fn: () => Promise<T>): Promise<T> {
+  if (!noCache) {
+    const hit = cacheGet<T>(key);
+    if (hit) return hit;
+  }
+  const result = await fn();
+  cacheSet(key, result, CACHE_TTL);
+  return result;
+}
+
+/** Individual check endpoints — each returns independently */
+
+router.get("/dns", async (req, res) => {
   const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  const [spf, dmarc, dkim, dnssec, caa, mx, ns, blacklist, danglingDns] = await Promise.allSettled([
+    cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT)),
+    cached(`dmarc:${domain}`, nc, () => checkDmarc(domain, DNS_TIMEOUT)),
+    cached(`dkim:${domain}`, nc, () => checkDkim(domain, DNS_TIMEOUT)),
+    cached(`dnssec:${domain}`, nc, () => checkDnssec(domain, DNS_TIMEOUT)),
+    cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT)),
+    cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT)),
+    cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT)),
+    cached(`bl:${domain}`, nc, () => checkBlacklist(domain, DNS_TIMEOUT)),
+    cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT)),
+  ]);
+  const x = <T>(s: PromiseSettledResult<T>, f: T): T => s.status === "fulfilled" ? s.value : f;
+  res.json({
+    spf: x(spf, { status: "fail", record: null, validations: [], mechanisms: [], dnsLookupCount: 0, error: "Check failed" }),
+    dmarc: x(dmarc, { status: "fail", record: null, validations: [], tags: [], error: "Check failed" }),
+    dkim: x(dkim, { status: "info", foundCount: 0, totalChecked: 14, selectors: [] }),
+    dnssec: x(dnssec, { status: "fail", enabled: false, error: "Check failed" }),
+    caa: x(caa, { status: "fail", records: [], error: "Check failed" }),
+    mx: x(mx, { status: "info", records: [] }),
+    ns: x(ns, { status: "fail", nameservers: [], error: "Check failed" }),
+    blacklist: x(blacklist, { status: "info", ip: null, providers: [], error: "Check failed" }),
+    danglingDns: x(danglingDns, { status: "info", records: [], danglingCount: 0, error: "Check failed" }),
+  });
+});
 
-  const [
-    fetchSettled,
-    spfSettled,
-    dmarcSettled,
-    dkimSettled,
-    dnssecSettled,
-    caaSettled,
-    mxSettled,
-    nsSettled,
-    domainExpirySettled,
-    blacklistSettled,
-    ctLogsSettled,
-    redirectsSettled,
-    seoSettled,
-    safeBrowsingSettled,
-    urlhausSettled,
-    danglingDnsSettled,
-  ] = await Promise.allSettled([
-    safeFetchWithHeaders(domain, HTTP_TIMEOUT),
-    checkSpf(domain, DNS_TIMEOUT),
-    checkDmarc(domain, DNS_TIMEOUT),
-    checkDkim(domain, DNS_TIMEOUT),
-    checkDnssec(domain, DNS_TIMEOUT),
-    checkCaa(domain, DNS_TIMEOUT),
-    checkMx(domain, DNS_TIMEOUT),
-    checkNs(domain, DNS_TIMEOUT),
-    checkDomainExpiry(domain, HTTP_TIMEOUT),
-    checkBlacklist(domain, DNS_TIMEOUT),
-    checkCtLogs(domain, 15000),
-    checkRedirects(domain, DNS_TIMEOUT),
-    checkSeo(domain, HTTP_TIMEOUT),
-    checkSafeBrowsing(domain, DNS_TIMEOUT),
-    checkUrlhaus(domain, DNS_TIMEOUT),
-    checkDanglingDns(domain, DNS_TIMEOUT),
+router.get("/web", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+
+  // Run security.txt fetch, headers fetch, and TLS check in parallel
+  const [fetchResult, headersResult, tlsCert] = await Promise.allSettled([
+    cached(`fetch:${domain}`, nc, () => safeFetchWithHeaders(domain, HTTP_TIMEOUT)),
+    cached(`hdrs:${domain}`, nc, async () => {
+      // Fetch headers from the domain root (independent of security.txt)
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT);
+      try {
+        const headRes = await fetch(`https://${domain}/`, {
+          method: "HEAD", signal: controller.signal, redirect: "follow",
+          headers: { "User-Agent": "security-txt-validator/1.0" },
+        });
+        clearTimeout(timer);
+        const h: Record<string, string> = {};
+        headRes.headers.forEach((v, k) => { h[k.toLowerCase()] = v; });
+        return h;
+      } catch { clearTimeout(timer); return null; }
+    }),
+    cached(`tls:${domain}`, nc, async () => {
+      // TLS cert extraction is already in safeFetchWithHeaders, but we need it independently
+      const tls = await import("node:tls");
+      return new Promise<any>((resolve) => {
+        const socket = tls.connect({ host: domain, port: 443, servername: domain, timeout: HTTP_TIMEOUT, rejectUnauthorized: false }, () => {
+          const cert = socket.getPeerCertificate();
+          socket.destroy();
+          if (!cert || !cert.valid_from) { resolve(null); return; }
+          const validFrom = new Date(cert.valid_from).toISOString();
+          const validTo = new Date(cert.valid_to).toISOString();
+          const daysRemaining = Math.floor((new Date(cert.valid_to).getTime() - Date.now()) / 86400000);
+          const sans: string[] = cert.subjectaltname ? cert.subjectaltname.split(",").map((s: string) => s.trim().replace(/^DNS:/, "")) : [];
+          resolve({ issuer: String(cert.issuer?.O || cert.issuer?.CN || "Unknown"), subject: String(cert.subject?.CN || "Unknown"), validFrom, validTo, daysRemaining, sans });
+        });
+        socket.on("error", () => { socket.destroy(); resolve(null); });
+        socket.on("timeout", () => { socket.destroy(); resolve(null); });
+      });
+    }),
   ]);
 
-  // Extract fetch result
-  let securityTxt: SecurityTxtSection;
-  let headers: HeadersResult;
-  let ssl: SslResult;
-
-  if (fetchSettled.status === "fulfilled" && fetchSettled.value.success) {
-    const fetchResult = fetchSettled.value as SafeFetchWithHeadersResponse;
-
-    // Parse and validate security.txt
-    const parsed = parse(fetchResult.content, { withPgp: true });
-    const validationResult = validate(parsed.lines, {
-      contentType: fetchResult.contentType,
-      fetchedFrom: fetchResult.fetchedFrom,
-      redirectChain: fetchResult.redirectChain,
-      wellKnownFound: fetchResult.wellKnownFound,
-      fallbackUsed: fetchResult.fallbackUsed,
-      usedHttps: true,
+  // Build security.txt section
+  let securityTxt: any;
+  const fr = fetchResult.status === "fulfilled" ? fetchResult.value : null;
+  if (fr && fr.success) {
+    const parsed = parse(fr.content, { withPgp: true });
+    const vr = validate(parsed.lines, {
+      contentType: fr.contentType, fetchedFrom: fr.fetchedFrom, redirectChain: fr.redirectChain,
+      wellKnownFound: fr.wellKnownFound, fallbackUsed: fr.fallbackUsed, usedHttps: true,
     }, parsed.pgp);
-
     securityTxt = {
-      status: validationResult.status === "valid" ? "pass" : validationResult.status === "valid-with-warnings" ? "warn" : "fail",
-      available: true,
-      validationStatus: validationResult.status,
-      errorCount: validationResult.errorCount,
-      warningCount: validationResult.warningCount,
-      findings: validationResult.findings.map(f => ({ severity: f.severity, title: f.title, explanation: f.explanation })),
-      fetchedFrom: fetchResult.fetchedFrom,
+      status: vr.status === "valid" ? "pass" : vr.status === "valid-with-warnings" ? "warn" : "fail",
+      available: true, validationStatus: vr.status, errorCount: vr.errorCount, warningCount: vr.warningCount,
+      findings: vr.findings.map((f: any) => ({ severity: f.severity, title: f.title, explanation: f.explanation })),
+      fetchedFrom: fr.fetchedFrom,
     };
-
-    headers = analyzeHeaders(fetchResult.responseHeaders);
-    ssl = analyzeSsl(fetchResult.tlsCert);
   } else {
-    const errorMsg = fetchSettled.status === "rejected"
-      ? fetchSettled.reason?.message || "Fetch failed"
-      : "Could not fetch security.txt";
-
-    securityTxt = {
-      status: "fail",
-      available: false,
-      validationStatus: null,
-      errorCount: 0,
-      warningCount: 0,
-      findings: [],
-      fetchedFrom: null,
-      error: errorMsg,
-    };
-    headers = { status: "info", items: [] };
-    ssl = { status: "fail", issuer: null, subject: null, validFrom: null, validTo: null, daysRemaining: null, sans: [], error: "Could not establish HTTPS connection" };
+    const errMsg = fr ? (fr as any).message || "Could not fetch security.txt" : "Could not fetch security.txt";
+    securityTxt = { status: "fail", available: false, validationStatus: null, errorCount: 0, warningCount: 0, findings: [], fetchedFrom: null, error: errMsg };
   }
 
-  const extract = <T>(settled: PromiseSettledResult<T>, fallback: T): T =>
-    settled.status === "fulfilled" ? settled.value : fallback;
+  // Build headers (independent of security.txt)
+  const rawHeaders = headersResult.status === "fulfilled" ? headersResult.value : null;
+  const headers = rawHeaders ? await analyzeHeaders(rawHeaders, domain) : { status: "info" as const, items: [] };
 
-  const response: DomainCheckResponse = {
-    domain,
-    timestamp: new Date().toISOString(),
-    securityTxt,
-    headers,
-    spf: extract<SpfResult>(spfSettled, { status: "fail", record: null, validations: [], mechanisms: [], dnsLookupCount: 0, error: "Check failed" }),
-    dmarc: extract<DmarcResult>(dmarcSettled, { status: "fail", record: null, validations: [], tags: [], error: "Check failed" }),
-    dkim: extract<DkimResult>(dkimSettled, { status: "info", foundCount: 0, totalChecked: 14, selectors: [] }),
-    dnssec: extract<DnssecResult>(dnssecSettled, { status: "fail", enabled: false, error: "Check failed" }),
-    caa: extract<CaaResult>(caaSettled, { status: "fail", records: [], error: "Check failed" }),
-    mx: extract<MxResult>(mxSettled, { status: "info", records: [] }),
-    ns: extract<NsResult>(nsSettled, { status: "fail", nameservers: [], error: "Check failed" }),
-    ssl,
-    domainExpiry: extract<DomainExpiryResult>(domainExpirySettled, { status: "info", expirationDate: null, daysRemaining: null, error: "Check failed" }),
-    blacklist: extract<BlacklistResult>(blacklistSettled, { status: "info", ip: null, providers: [], error: "Check failed" }),
-    ctLogs: extract<CtLogsResult>(ctLogsSettled, { status: "info", totalCerts: 0, recentCerts: [], error: "Check failed" }),
-    redirects: extract<RedirectResult>(redirectsSettled, { status: "info", httpsRedirect: false, wwwBehavior: null, items: [], error: "Check failed" }),
-    seo: extract<SeoResult>(seoSettled, { status: "info", items: [], error: "Check failed" }),
-    safeBrowsing: extract<SafeBrowsingResult>(safeBrowsingSettled, { status: "info", safe: null, threats: [], error: "Check failed" }),
-    urlhaus: extract<UrlhausResult>(urlhausSettled, { status: "info", listed: false, urlCount: 0, error: "Check failed" }),
-    danglingDns: extract<DanglingDnsResult>(danglingDnsSettled, { status: "info", records: [], danglingCount: 0, error: "Check failed" }),
-  };
+  // Build SSL (independent)
+  const cert = tlsCert.status === "fulfilled" ? tlsCert.value : null;
+  const ssl = analyzeSsl(cert);
 
-  res.json(response);
+  res.json({ securityTxt, headers, ssl });
+});
+
+router.get("/expiry", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  res.json(await cached(`exp:${domain}`, nc, () => checkDomainExpiry(domain, HTTP_TIMEOUT)));
+});
+
+router.get("/ct", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  res.json(await cached(`ct:${domain}`, nc, () => checkCtLogs(domain, 20000)));
+});
+
+router.get("/redirects", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  res.json(await cached(`redir:${domain}`, nc, () => checkRedirects(domain, HTTP_TIMEOUT)));
+});
+
+router.get("/seo", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  res.json(await cached(`seo:${domain}`, nc, () => checkSeo(domain, HTTP_TIMEOUT)));
+});
+
+router.get("/reputation", async (req, res) => {
+  const domain = req.query.domain as string;
+  const nc = req.query.noCache === "1";
+  const [sb, uh] = await Promise.allSettled([
+    cached(`sb:${domain}`, nc, () => checkSafeBrowsing(domain, DNS_TIMEOUT)),
+    cached(`uh:${domain}`, nc, () => checkUrlhaus(domain, DNS_TIMEOUT)),
+  ]);
+  const x = <T>(s: PromiseSettledResult<T>, f: T): T => s.status === "fulfilled" ? s.value : f;
+  res.json({
+    safeBrowsing: x(sb, { status: "info", safe: null, threats: [], error: "Check failed" }),
+    urlhaus: x(uh, { status: "info", listed: false, urlCount: 0, error: "Check failed" }),
+  });
 });
 
 export default router;

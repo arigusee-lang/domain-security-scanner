@@ -270,6 +270,7 @@ export interface RedirectCheckItem {
   check: string;
   status: CheckStatus;
   detail: string;
+  ref?: string;
 }
 
 export interface RedirectResult {
@@ -286,6 +287,7 @@ export interface SeoCheckItem {
   check: string;
   status: CheckStatus;
   detail: string;
+  ref?: string;
 }
 
 export interface SeoResult {
