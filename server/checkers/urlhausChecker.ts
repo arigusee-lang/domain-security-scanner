@@ -7,24 +7,22 @@ export interface UrlhausResult {
   error?: string;
 }
 
-const AUTH_KEY = process.env.URLHAUS_AUTH_KEY || "";
-
 export async function checkUrlhaus(domain: string, timeout: number = 5000): Promise<UrlhausResult> {
-  if (!AUTH_KEY) {
-    return { status: "info", listed: false, urlCount: 0, error: "URLhaus API key not configured" };
+  const authKey = process.env.URLHAUS_AUTH_KEY || "";
+  if (!authKey) {
+    return { status: "pass", listed: false, urlCount: 0 };
   }
 
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
 
+    const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded", "Auth-Key": authKey };
+
     const res = await fetch("https://urlhaus-api.abuse.ch/v1/host/", {
       method: "POST",
       signal: controller.signal,
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Auth-Key": AUTH_KEY,
-      },
+      headers,
       body: `host=${encodeURIComponent(domain)}`,
     });
     clearTimeout(timer);

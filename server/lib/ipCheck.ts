@@ -65,12 +65,150 @@ function isBlockedIpv6(ip: string): boolean {
   if (normalized === "0000:0000:0000:0000:0000:0000:0000:0001") return true;
   // :: (all zeros)
   if (/^0{4}(:0{4}){7}$/.test(normalized)) return true;
-  // fc00::/7 (unique local) — first byte fc or fd
+  // fc00::/7 (unique local) ï¿½ first byte fc or fd
   const firstByte = parseInt(normalized.slice(0, 2), 16);
   if (firstByte >= 0xfc && firstByte <= 0xfd) return true;
-  // fe80::/10 (link-local) — first 10 bits are 1111111010
+  // fe80::/10 (link-local) ï¿½ first 10 bits are 1111111010
   if (normalized.startsWith("fe8") || normalized.startsWith("fe9") ||
       normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
 
   return false;
+}
+
+import dns from "node:dns/promises";
+import tls from "node:tls";
+
+/**
+ * Resolves a hostname and verifies none of its IPs are in blocked ranges.
+ * Throws an error with `code: "SSRF_BLOCKED"` if any IP is private/reserved,
+ * or `code: "DNS_FAILURE"` if the hostname cannot be resolved.
+ */
+export async function assertSafeHostname(hostname: string): Promise<void> {
+  let addresses: string[];
+  try {
+    const v4 = await dns.resolve4(hostname).catch(() => [] as string[]);
+    const v6 = await dns.resolve6(hostname).catch(() => [] as string[]);
+    addresses = [...v4, ...v6];
+  } catch {
+    const err = new Error("Could not resolve domain.");
+    (err as any).code = "DNS_FAILURE";
+    throw err;
+  }
+
+  if (addresses.length === 0) {
+    const err = new Error("Could not resolve domain.");
+    (err as any).code = "DNS_FAILURE";
+    throw err;
+  }
+
+  for (const ip of addresses) {
+    if (isBlockedIp(ip)) {
+      const err = new Error("Restricted address.");
+      (err as any).code = "SSRF_BLOCKED";
+      throw err;
+    }
+  }
+}
+
+const MAX_SSRF_REDIRECTS = 5;
+
+/**
+ * Drop-in replacement for global `fetch` that checks the target hostname
+ * against private/reserved IP ranges before making the request.
+ * Handles redirects manually to IP-check each hop (prevents TOCTOU bypass).
+ * Accepts the same arguments as `fetch`.
+ */
+export async function ssrfSafeFetch(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+  await assertSafeHostname(url.hostname);
+
+  // If caller already handles redirects manually, just pass through
+  if (init?.redirect === "manual") {
+    return fetch(input, init);
+  }
+
+  // Otherwise, override to manual and handle redirects ourselves with IP checks
+  const response = await fetch(input, { ...init, redirect: "manual" });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (!location) return response;
+
+    const redirectUrl = new URL(location, url);
+    return ssrfSafeFetchWithRedirects(redirectUrl.toString(), init, 1);
+  }
+
+  return response;
+}
+
+async function ssrfSafeFetchWithRedirects(
+  url: string,
+  init: RequestInit | undefined,
+  count: number,
+): Promise<Response> {
+  if (count > MAX_SSRF_REDIRECTS) {
+    throw new Error("Too many redirects");
+  }
+
+  const parsed = new URL(url);
+  await assertSafeHostname(parsed.hostname);
+
+  const response = await fetch(url, { ...init, redirect: "manual" });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (!location) return response;
+
+    const redirectUrl = new URL(location, url);
+    return ssrfSafeFetchWithRedirects(redirectUrl.toString(), init, count + 1);
+  }
+
+  return response;
+}
+
+/**
+ * SSRF-safe wrapper around `tls.connect`.
+ * Resolves the hostname first and blocks private/reserved IPs.
+ */
+export function ssrfSafeTlsConnect(
+  options: tls.ConnectionOptions & { host: string },
+): Promise<tls.TLSSocket> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await assertSafeHostname(options.host);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const socket = tls.connect(options, () => resolve(socket));
+    socket.on("error", reject);
+  });
+}
+
+/**
+ * Pre-warm the OS DNS cache for a domain.
+ * Call once before firing parallel checks to avoid cold-resolver timeouts.
+ * Returns the resolved IPv4 address (or null on failure). Silently swallows errors.
+ */
+const _dnsWarmCache = new Map<string, { ip: string | null; ts: number }>();
+const DNS_WARM_TTL = 60_000; // 1 minute
+
+export async function warmDns(hostname: string, timeoutMs = 5000): Promise<string | null> {
+  const cached = _dnsWarmCache.get(hostname);
+  if (cached && Date.now() - cached.ts < DNS_WARM_TTL) return cached.ip;
+  try {
+    const result = await Promise.race([
+      dns.resolve4(hostname),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("dns warmup timeout")), timeoutMs)),
+    ]);
+    const ip = result?.[0] ?? null;
+    _dnsWarmCache.set(hostname, { ip, ts: Date.now() });
+    return ip;
+  } catch {
+    _dnsWarmCache.set(hostname, { ip: null, ts: Date.now() });
+    return null;
+  }
 }

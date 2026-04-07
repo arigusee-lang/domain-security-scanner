@@ -1,4 +1,5 @@
 import type { CheckStatus } from "../types.js";
+import { ssrfSafeFetch } from "../lib/ipCheck.js";
 
 export interface RedirectCheckItem {
   check: string;
@@ -22,7 +23,7 @@ async function checkUrl(url: string, timeout: number): Promise<{ status: number;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    const res = await fetch(url, { method: "HEAD", redirect: "manual", signal: controller.signal, headers: { "User-Agent": "security-txt-validator/1.0" } });
+    const res = await ssrfSafeFetch(url, { method: "HEAD", redirect: "manual", signal: controller.signal, headers: { "User-Agent": "security-txt-validator/1.0" } });
     clearTimeout(timer);
     return { status: res.status, location: res.headers.get("location") };
   } catch { return null; }

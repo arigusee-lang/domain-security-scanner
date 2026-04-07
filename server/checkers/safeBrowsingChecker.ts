@@ -12,10 +12,9 @@ export interface SafeBrowsingResult {
   error?: string;
 }
 
-const API_KEY = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
-
 export async function checkSafeBrowsing(domain: string, timeout: number = 5000): Promise<SafeBrowsingResult> {
-  if (!API_KEY) {
+  const apiKey = process.env.GOOGLE_SAFE_BROWSING_KEY || "";
+  if (!apiKey) {
     return { status: "info", safe: null, threats: [], error: "Safe Browsing API key not configured" };
   }
 
@@ -24,7 +23,7 @@ export async function checkSafeBrowsing(domain: string, timeout: number = 5000):
     const timer = setTimeout(() => controller.abort(), timeout);
 
     const res = await fetch(
-      `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${API_KEY}`,
+      `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${apiKey}`,
       {
         method: "POST",
         signal: controller.signal,

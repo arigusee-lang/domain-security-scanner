@@ -1,0 +1,24 @@
+[Unit]
+Description=DN-Sec Domain Security Checker
+After=network.target
+
+[Service]
+Type=simple
+User=dn-sec
+Group=dn-sec
+WorkingDirectory=/opt/dn-sec
+ExecStart=/usr/bin/npx tsx server/index.ts
+Restart=always
+RestartSec=5
+
+# Load env vars from file (secrets live here, not in git)
+EnvironmentFile=/opt/dn-sec/.env
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/dn-sec/data
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

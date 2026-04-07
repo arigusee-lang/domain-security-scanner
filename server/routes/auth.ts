@@ -1,0 +1,321 @@
+import { Router } from "express";
+import * as arctic from "arctic";
+import crypto from "node:crypto";
+import type { Lucia } from "lucia";
+import type Database from "better-sqlite3";
+import { requireAuth } from "../middleware/authMiddleware.js";
+
+/** In dev, redirect to Vite dev server; in prod, redirect to same origin */
+const FRONTEND_URL = process.env.APP_URL || "http://localhost:5173";
+function frontendRedirect(path: string): string {
+  return `${FRONTEND_URL}${path}`;
+}
+
+interface AuthDeps {
+  lucia: Lucia;
+  google: InstanceType<typeof arctic.Google> | null;
+  github: InstanceType<typeof arctic.GitHub> | null;
+  db: Database.Database;
+}
+
+export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Router {
+  const router = Router();
+
+  // ── Google OAuth ──
+
+  router.get("/google", async (_req, res) => {
+    if (!google) { res.redirect(frontendRedirect("/?auth_error=not_configured")); return; }
+    try {
+      const state = arctic.generateState();
+      const codeVerifier = arctic.generateCodeVerifier();
+      const scopes = ["openid", "profile", "email"];
+      const url = google.createAuthorizationURL(state, codeVerifier, scopes);
+
+      res.cookie("google_oauth_state", state, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 60 * 10 * 1000, // 10 minutes
+        sameSite: "lax",
+        path: "/",
+      });
+      res.cookie("google_code_verifier", codeVerifier, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 60 * 10 * 1000,
+        sameSite: "lax",
+        path: "/",
+      });
+
+      res.redirect(url.toString());
+    } catch (err) {
+      console.error("[auth/google] init error:", err);
+      res.redirect(frontendRedirect("/?auth_error=1"));
+    }
+  });
+
+  router.get("/google/callback", async (req, res) => {
+    if (!google) { res.redirect(frontendRedirect("/?auth_error=not_configured")); return; }
+    try {
+      const code = req.query.code as string | undefined;
+      const state = req.query.state as string | undefined;
+      const storedState = (req as any).cookies?.google_oauth_state
+        ?? parseCookie(req.headers.cookie ?? "", "google_oauth_state");
+      const codeVerifier = (req as any).cookies?.google_code_verifier
+        ?? parseCookie(req.headers.cookie ?? "", "google_code_verifier");
+
+      if (!code || !state || !storedState || state !== storedState || !codeVerifier) {
+        console.error("[auth/google] state mismatch", {
+          hasCode: !!code, hasState: !!state, hasStoredState: !!storedState,
+          match: state === storedState, hasVerifier: !!codeVerifier,
+        });
+        return res.redirect(frontendRedirect("/?auth_error=1"));
+      }
+
+      const tokens = await google.validateAuthorizationCode(code, codeVerifier);
+      const accessToken = tokens.accessToken();
+
+      const userResponse = await fetch(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!userResponse.ok) {
+        console.error("[auth/google] userinfo fetch failed", userResponse.status);
+        return res.redirect(frontendRedirect("/?auth_error=1"));
+      }
+
+      const googleUser = (await userResponse.json()) as {
+        sub: string;
+        email: string;
+        name?: string;
+        picture?: string;
+      };
+
+      const user = upsertUser(db, {
+        provider: "google",
+        providerId: googleUser.sub,
+        email: googleUser.email,
+        name: googleUser.name ?? null,
+        avatarUrl: googleUser.picture ?? null,
+      });
+
+      const session = await lucia.createSession(user.id, {});
+      res.appendHeader(
+        "Set-Cookie",
+        lucia.createSessionCookie(session.id).serialize()
+      );
+
+      // Clear OAuth cookies
+      res.cookie("google_oauth_state", "", { maxAge: 0, path: "/" });
+      res.cookie("google_code_verifier", "", { maxAge: 0, path: "/" });
+
+      res.redirect(frontendRedirect("/"));
+    } catch (err) {
+      console.error("[auth/google] callback error:", err);
+      res.redirect(frontendRedirect("/?auth_error=1"));
+    }
+  });
+
+
+  // ── GitHub OAuth ──
+
+  router.get("/github", async (_req, res) => {
+    if (!github) { res.redirect(frontendRedirect("/?auth_error=not_configured")); return; }
+    try {
+      const state = arctic.generateState();
+      const scopes = ["user:email"];
+      const url = github.createAuthorizationURL(state, scopes);
+
+      res.cookie("github_oauth_state", state, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 60 * 10 * 1000,
+        sameSite: "lax",
+        path: "/",
+      });
+
+      res.redirect(url.toString());
+    } catch (err) {
+      console.error("[auth/github] init error:", err);
+      res.redirect(frontendRedirect("/?auth_error=1"));
+    }
+  });
+
+  router.get("/github/callback", async (req, res) => {
+    if (!github) { res.redirect(frontendRedirect("/?auth_error=not_configured")); return; }
+    try {
+      const code = req.query.code as string | undefined;
+      const state = req.query.state as string | undefined;
+      const storedState = (req as any).cookies?.github_oauth_state
+        ?? parseCookie(req.headers.cookie ?? "", "github_oauth_state");
+
+      if (!code || !state || !storedState || state !== storedState) {
+        console.error("[auth/github] state mismatch", {
+          hasCode: !!code, hasState: !!state, hasStoredState: !!storedState,
+          match: state === storedState,
+        });
+        return res.redirect(frontendRedirect("/?auth_error=1"));
+      }
+
+      const tokens = await github.validateAuthorizationCode(code);
+      const accessToken = tokens.accessToken();
+
+      // Get user profile
+      const userResponse = await fetch("https://api.github.com/user", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!userResponse.ok) {
+        console.error("[auth/github] user fetch failed", userResponse.status, await userResponse.text());
+        return res.redirect(frontendRedirect("/?auth_error=1"));
+      }
+
+      const githubUser = (await userResponse.json()) as {
+        id: number;
+        login: string;
+        name?: string;
+        avatar_url?: string;
+        email?: string;
+      };
+
+      // Get primary email if not in profile
+      let email = githubUser.email;
+      if (!email) {
+        const emailsResponse = await fetch("https://api.github.com/user/emails", {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (emailsResponse.ok) {
+          const emails = (await emailsResponse.json()) as Array<{
+            email: string;
+            primary: boolean;
+            verified: boolean;
+          }>;
+          const primary = emails.find((e) => e.primary && e.verified);
+          email = primary?.email ?? emails[0]?.email ?? null;
+        }
+      }
+
+      if (!email) {
+        console.error("[auth/github] no email found for user", githubUser.login);
+        return res.redirect(frontendRedirect("/?auth_error=1"));
+      }
+
+      const user = upsertUser(db, {
+        provider: "github",
+        providerId: String(githubUser.id),
+        email,
+        name: githubUser.name ?? githubUser.login,
+        avatarUrl: githubUser.avatar_url ?? null,
+      });
+
+      const session = await lucia.createSession(user.id, {});
+      res.appendHeader(
+        "Set-Cookie",
+        lucia.createSessionCookie(session.id).serialize()
+      );
+
+      // Clear OAuth cookie
+      res.cookie("github_oauth_state", "", { maxAge: 0, path: "/" });
+
+      res.redirect(frontendRedirect("/"));
+    } catch (err) {
+      console.error("[auth/github] callback error:", err);
+      res.redirect(frontendRedirect("/?auth_error=1"));
+    }
+  });
+
+  // ── Logout ──
+
+  router.post("/logout", requireAuth, async (req, res) => {
+    try {
+      await lucia.invalidateSession(req.session!.id);
+      res.appendHeader(
+        "Set-Cookie",
+        lucia.createBlankSessionCookie().serialize()
+      );
+      res.status(200).json({ success: true });
+    } catch {
+      res.status(500).json({ error: "internal" });
+    }
+  });
+
+  // ── Current user ──
+
+  router.get("/me", (req, res) => {
+    if (!req.user) {
+      res.json(null);
+      return;
+    }
+    res.json({
+      id: req.user.id,
+      email: req.user.email,
+      name: req.user.name,
+      avatarUrl: req.user.avatarUrl,
+      plan: req.user.plan,
+    });
+  });
+
+  return router;
+}
+
+// ── Helpers ──
+
+interface OAuthProfile {
+  provider: "google" | "github";
+  providerId: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+}
+
+/**
+ * Upsert user: find by provider+provider_id, then by email, or create new.
+ * If the same email exists from a different provider, link to that account
+ * (update provider/provider_id so future logins match directly).
+ */
+export function upsertUser(
+  db: Database.Database,
+  profile: OAuthProfile
+): { id: string } {
+  // 1. Exact match on provider + provider_id (returning user, same provider)
+  const byProvider = db
+    .prepare("SELECT id FROM users WHERE provider = ? AND provider_id = ?")
+    .get(profile.provider, profile.providerId) as { id: string } | undefined;
+
+  if (byProvider) {
+    db.prepare(
+      "UPDATE users SET name = ?, avatar_url = ?, email = ? WHERE id = ?"
+    ).run(profile.name, profile.avatarUrl, profile.email, byProvider.id);
+    return { id: byProvider.id };
+  }
+
+  // 2. Same email from a different provider — link accounts
+  const byEmail = db
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get(profile.email) as { id: string } | undefined;
+
+  if (byEmail) {
+    db.prepare(
+      "UPDATE users SET name = ?, avatar_url = ?, provider = ?, provider_id = ? WHERE id = ?"
+    ).run(profile.name, profile.avatarUrl, profile.provider, profile.providerId, byEmail.id);
+    return { id: byEmail.id };
+  }
+
+  // 3. Brand new user
+  const id = crypto.randomUUID();
+  db.prepare(
+    `INSERT INTO users (id, email, name, avatar_url, provider, provider_id, plan)
+     VALUES (?, ?, ?, ?, ?, ?, 'registered')`
+  ).run(id, profile.email, profile.name, profile.avatarUrl, profile.provider, profile.providerId);
+
+  return { id };
+}
+
+/**
+ * Simple cookie parser — extracts a single cookie value by name.
+ */
+function parseCookie(cookieHeader: string, name: string): string | null {
+  const match = cookieHeader
+    .split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(`${name}=`));
+  return match ? decodeURIComponent(match.substring(name.length + 1)) : null;
+}

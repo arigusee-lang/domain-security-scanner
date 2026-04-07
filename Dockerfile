@@ -13,7 +13,11 @@ RUN npm ci --omit=dev
 RUN npm i tsx
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY src/lib ./src/lib
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV DB_DIR=/data
 EXPOSE 8080
+# Create data directory for SQLite
+RUN mkdir -p /data
 CMD ["npx", "tsx", "server/index.ts"]

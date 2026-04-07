@@ -6,3 +6,9 @@ dist/
 !.dockerignore
 *.log
 *.tsbuildinfo
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm

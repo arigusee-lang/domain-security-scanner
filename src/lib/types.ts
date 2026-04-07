@@ -179,6 +179,44 @@ export interface NsResult {
   error?: string;
 }
 
+// ── SSL Chain & CT types (duplicated from server for frontend) ──
+
+export type CertRole = "leaf" | "intermediate" | "root";
+
+export interface ChainCertInfo {
+  subject: string;
+  issuer: string;
+  validFrom: string;
+  validTo: string;
+  isSelfSigned: boolean;
+  role: CertRole;
+}
+
+export interface ChainIssue {
+  severity: CheckStatus;
+  message: string;
+}
+
+export interface SctInfo {
+  version: number;
+  logId: string;
+  timestamp: number;
+  logName: string | null;
+  operator: string | null;
+}
+
+export interface CtPolicyFinding {
+  severity: CheckStatus;
+  message: string;
+}
+
+export interface CtPolicyResult {
+  scts: SctInfo[];
+  chromeStatus: CheckStatus;
+  appleStatus: CheckStatus;
+  findings: CtPolicyFinding[];
+}
+
 export interface SslResult {
   status: CheckStatus;
   issuer: string | null;
@@ -188,6 +226,12 @@ export interface SslResult {
   daysRemaining: number | null;
   sans: string[];
   error?: string;
+
+  // Deep check fields (optional for backward compatibility)
+  chain?: ChainCertInfo[];
+  chainStatus?: CheckStatus;
+  chainIssues?: ChainIssue[];
+  ct?: CtPolicyResult;
 }
 
 export interface DomainExpiryResult {
@@ -201,11 +245,13 @@ export interface DnsblProviderResult {
   provider: string;
   host: string;
   listed: boolean;
+  type: "ip" | "domain";
 }
 
 export interface BlacklistResult {
   status: CheckStatus;
   ip: string | null;
+  cdnProvider?: string;
   providers: DnsblProviderResult[];
   error?: string;
 }
@@ -251,16 +297,31 @@ export interface DomainCheckResult {
 // ── Certificate Transparency ──
 
 export interface CtLogEntry {
+  id?: string;
   issuerName: string;
   commonName: string;
   notBefore: string;
   notAfter: string;
 }
 
+export interface CtFinding {
+  severity: "warn" | "fail" | "info";
+  title: string;
+  description: string;
+  subdomain?: string;
+}
+
+export type CtDataSource = "crt.sh" | "certspotter" | "cache" | "none";
+
 export interface CtLogsResult {
   status: CheckStatus;
   totalCerts: number;
   recentCerts: CtLogEntry[];
+  flaggedCerts?: CtLogEntry[];
+  findings: CtFinding[];
+  source: CtDataSource;
+  fromCache?: boolean;
+  cachedAt?: string;
   error?: string;
 }
 

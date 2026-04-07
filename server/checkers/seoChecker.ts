@@ -1,4 +1,5 @@
 import type { CheckStatus } from "../types.js";
+import { ssrfSafeFetch } from "../lib/ipCheck.js";
 
 export interface SeoCheckItem {
   check: string;
@@ -19,7 +20,7 @@ async function fetchText(url: string, timeout: number): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    const res = await fetch(url, { signal: controller.signal, headers: { "User-Agent": "security-txt-validator/1.0" } });
+    const res = await ssrfSafeFetch(url, { signal: controller.signal, headers: { "User-Agent": "security-txt-validator/1.0" } });
     clearTimeout(timer);
     if (!res.ok) return null;
     return await res.text();

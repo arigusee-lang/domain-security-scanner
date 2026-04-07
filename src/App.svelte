@@ -1,7 +1,9 @@
 <script lang="ts">
   import NavBar from './components/NavBar.svelte';
   import Router from './components/Router.svelte';
+  import Footer from './components/Footer.svelte';
   import { onMount } from 'svelte';
+  import { fetchCurrentUser } from './lib/authStore';
 
   let theme: 'dark' | 'light' = 'dark';
   let currentPath = '/';
@@ -14,6 +16,8 @@
       theme = 'light';
     }
     document.documentElement.setAttribute('data-theme', theme);
+
+    fetchCurrentUser();
   });
 
   function toggleTheme() {
@@ -26,4 +30,5 @@
 <div class="container">
   <NavBar {theme} {currentPath} on:toggleTheme={toggleTheme} />
   <Router bind:currentPath />
+  <Footer />
 </div>

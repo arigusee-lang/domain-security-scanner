@@ -12,6 +12,8 @@
     return statuses.reduce((a, b) => order[a] <= order[b] ? a : b);
   }
 
+  $: domainProviders = blacklist.providers.filter(p => p.type === 'domain');
+  $: ipProviders = blacklist.providers.filter(p => p.type === 'ip');
   $: overall = worst(safeBrowsing.status, urlhaus.status, blacklist.status);
 
   const THREAT_LABELS: Record<string, string> = {
@@ -20,12 +22,22 @@
     UNWANTED_SOFTWARE: "Unwanted Software",
     POTENTIALLY_HARMFUL_APPLICATION: "Potentially Harmful",
   };
+
+  const PROVIDER_URLS: Record<string, string> = {
+    "Spamhaus ZEN": "https://www.spamhaus.org/zen/",
+    "Barracuda": "https://www.barracudacentral.org/lookups",
+    "SpamCop": "https://www.spamcop.net/",
+    "SORBS": "http://www.sorbs.net/",
+    "UCEPROTECT L1": "https://www.uceprotect.net/en/",
+    "Spamhaus DBL": "https://www.spamhaus.org/dbl/",
+    "SURBL": "https://surbl.org/",
+  };
 </script>
 
 <ResultCard title="Domain Reputation" status={overall}>
   <!-- Safe Browsing -->
   <section class="sub-section">
-    <h4 class="sub-title"><CheckStatusIcon status={safeBrowsing.status} /> Google Safe Browsing</h4>
+    <h4 class="sub-title"><CheckStatusIcon status={safeBrowsing.status} /> <a class="ref-link" href="https://transparencyreport.google.com/safe-browsing/search" target="_blank" rel="noopener">Google Safe Browsing</a></h4>
     {#if safeBrowsing.error}
       <p class="note">{safeBrowsing.error}</p>
     {:else if safeBrowsing.safe === true}
@@ -41,7 +53,7 @@
 
   <!-- URLhaus -->
   <section class="sub-section">
-    <h4 class="sub-title"><CheckStatusIcon status={urlhaus.status} /> URLhaus (abuse.ch)</h4>
+    <h4 class="sub-title"><CheckStatusIcon status={urlhaus.status} /> <a class="ref-link" href="https://urlhaus.abuse.ch/" target="_blank" rel="noopener">URLhaus (abuse.ch)</a></h4>
     {#if urlhaus.error}
       <p class="note">{urlhaus.error}</p>
     {:else if urlhaus.listed}
@@ -51,22 +63,53 @@
     {/if}
   </section>
 
-  <!-- Blacklist (moved from EmailSecurityCard) -->
+  <!-- Blacklists -->
   <section class="sub-section">
-    <h4 class="sub-title"><CheckStatusIcon status={blacklist.status} /> Blacklists (DNSBL)</h4>
+    <h4 class="sub-title"><CheckStatusIcon status={blacklist.status} /> <a class="ref-link" href="https://www.dnsbl.info/" target="_blank" rel="noopener">Blacklists (DNSBL)</a></h4>
     {#if blacklist.error}
       <p class="note">{blacklist.error}</p>
     {:else if blacklist.ip}
       <p class="bl-ip">IP: <code>{blacklist.ip}</code></p>
-      <div class="bl-list">
-        {#each blacklist.providers as p}
-          <div class="bl-row">
-            <span class="bl-dot" class:listed={p.listed} aria-hidden="true"></span>
-            <span>{p.provider}</span>
-            <span class="bl-status">{p.listed ? 'Listed' : 'Clear'}</span>
-          </div>
-        {/each}
-      </div>
+
+      {#if blacklist.cdnProvider}
+        <div class="cdn-badge" title="IP {blacklist.ip} belongs to {blacklist.cdnProvider}. IP-based blacklist results may not reflect this specific domain.">
+          <span class="cdn-icon">ⓘ</span> Cloud/CDN detected: {blacklist.cdnProvider} — IP-based results may be inaccurate
+        </div>
+      {/if}
+
+      {#if domainProviders.length > 0}
+        <p class="bl-section-label">Domain-based</p>
+        <div class="bl-list">
+          {#each domainProviders as p}
+            <div class="bl-row">
+              <span class="bl-dot" class:listed={p.listed} aria-hidden="true"></span>
+              {#if PROVIDER_URLS[p.provider]}
+                <a class="ref-link" href={PROVIDER_URLS[p.provider]} target="_blank" rel="noopener">{p.provider}</a>
+              {:else}
+                <span>{p.provider}</span>
+              {/if}
+              <span class="bl-status">{p.listed ? 'Listed' : 'Clear'}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      {#if ipProviders.length > 0}
+        <p class="bl-section-label">IP-based{blacklist.cdnProvider ? ' (CDN IP)' : ''}</p>
+        <div class="bl-list">
+          {#each ipProviders as p}
+            <div class="bl-row">
+              <span class="bl-dot" class:listed={p.listed} aria-hidden="true"></span>
+              {#if PROVIDER_URLS[p.provider]}
+                <a class="ref-link" href={PROVIDER_URLS[p.provider]} target="_blank" rel="noopener">{p.provider}</a>
+              {:else}
+                <span>{p.provider}</span>
+              {/if}
+              <span class="bl-status">{p.listed ? 'Listed' : 'Clear'}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
     {:else}
       <p class="note">Could not determine domain IP</p>
     {/if}
@@ -96,4 +139,14 @@
   .bl-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-valid); flex-shrink: 0; }
   .bl-dot.listed { background: var(--color-error); }
   .bl-status { margin-left: auto; font-size: 0.7rem; }
+  .bl-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-secondary); margin: 0.5rem 0 0.2rem; }
+  .cdn-badge {
+    display: flex; align-items: center; gap: 0.3rem;
+    font-size: 0.72rem; color: var(--color-warning);
+    background: rgba(230, 167, 0, 0.08); border: 1px solid rgba(230, 167, 0, 0.2);
+    border-radius: var(--radius); padding: 0.3rem 0.5rem; margin: 0.3rem 0; cursor: help;
+  }
+  .cdn-icon { font-size: 0.8rem; opacity: 0.8; }
+  .ref-link { color: inherit; text-decoration: none; }
+  .ref-link:hover { text-decoration: underline; color: var(--color-accent); }
 </style>

@@ -179,6 +179,8 @@ export interface NsResult {
 
 // ── SSL ──
 
+import type { ChainCertInfo, ChainIssue, CtPolicyResult } from "./checkers/sslChecker.types.js";
+
 export interface SslResult {
   status: CheckStatus;
   issuer: string | null;
@@ -188,6 +190,12 @@ export interface SslResult {
   daysRemaining: number | null;
   sans: string[];
   error?: string;
+
+  // Deep check fields (optional for backward compatibility)
+  chain?: ChainCertInfo[];
+  chainStatus?: CheckStatus;
+  chainIssues?: ChainIssue[];
+  ct?: CtPolicyResult;
 }
 
 // ── Domain Expiry ──
@@ -205,11 +213,13 @@ export interface DnsblProviderResult {
   provider: string;
   host: string;
   listed: boolean;
+  type: "ip" | "domain";
 }
 
 export interface BlacklistResult {
   status: CheckStatus;
   ip: string | null;
+  cdnProvider?: string;
   providers: DnsblProviderResult[];
   error?: string;
 }
@@ -259,17 +269,40 @@ export interface DomainCheckResponse {
 // ── Certificate Transparency ──
 
 export interface CtLogEntry {
+  id?: string;
   issuerName: string;
   commonName: string;
   notBefore: string;
   notAfter: string;
 }
 
+export interface CtFinding {
+  severity: "warn" | "fail" | "info";
+  title: string;
+  description: string;
+  subdomain?: string;
+}
+
+export type CtDataSource = "crt.sh" | "certspotter" | "cache" | "none";
+
 export interface CtLogsResult {
   status: CheckStatus;
   totalCerts: number;
   recentCerts: CtLogEntry[];
+  flaggedCerts?: CtLogEntry[];
+  findings: CtFinding[];
+  source: CtDataSource;
+  fromCache?: boolean;
+  cachedAt?: string;
   error?: string;
+}
+
+export interface CtCheckOptions {
+  authenticated?: boolean;
+  sslIssuer?: string | null;
+  caaRecords?: CaaRecord[];
+  crtShFirst?: boolean;
+  timeout?: number;
 }
 
 // ── Redirect / HTTPS ──
@@ -340,4 +373,207 @@ export interface DanglingDnsResult {
   records: DanglingRecord[];
   danglingCount: number;
   error?: string;
+}
+
+// ── Phase 3: Accounts, Batch, Monitoring types ──
+
+export interface UserRow {
+  id: string;
+  email: string;
+  name: string | null;
+  avatar_url: string | null;
+  provider: "google" | "github";
+  provider_id: string;
+  plan: "registered" | "pro" | "enterprise";
+  created_at: string;
+}
+
+export interface ScanRow {
+  id: string;
+  user_id: string | null;
+  domain: string;
+  scan_type: "single" | "batch";
+  status: "pending" | "running" | "completed" | "failed";
+  score: number | null;
+  grade: string | null;
+  config_json: string | null;
+  result_json: string | null;
+  changes_json: string | null;
+  shared: number;
+  share_id: string | null;
+  share_expires: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface BatchScanRow {
+  id: string;
+  user_id: string;
+  name: string | null;
+  status: "pending" | "running" | "completed" | "failed";
+  total_domains: number;
+  completed_domains: number;
+  config_json: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface BatchScanDomainRow {
+  id: string;
+  batch_id: string;
+  domain: string;
+  scan_id: string | null;
+  status: "pending" | "running" | "completed" | "failed";
+}
+
+export interface ScheduledScanRow {
+  id: string;
+  user_id: string;
+  name: string | null;
+  domains_json: string;
+  cron: string;
+  config_json: string | null;
+  enabled: number;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+}
+
+export interface WebhookRow {
+  id: string;
+  user_id: string;
+  url: string;
+  name: string | null;
+  secret: string;
+  events_json: string;
+  enabled: number;
+  failing: number;
+  fail_count: number;
+  created_at: string;
+}
+
+export interface WebhookDeliveryRow {
+  id: string;
+  webhook_id: string;
+  event: string;
+  payload_json: string;
+  status: "pending" | "delivered" | "failed";
+  response_code: number | null;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+export interface NotificationLogRow {
+  id: string;
+  user_id: string;
+  scan_id: string | null;
+  scheduled_id: string | null;
+  type: "email" | "webhook";
+  status: "pending" | "sent" | "failed";
+  payload_json: string | null;
+  error: string | null;
+  created_at: string;
+  sent_at: string | null;
+}
+
+// ── Score ──
+
+export interface ScoreBreakdown {
+  [category: string]: { earned: number; max: number };
+}
+
+export interface ScoreResponse {
+  total: number;
+  grade: string;
+  breakdown: ScoreBreakdown;
+}
+
+// ── Remediation ──
+
+export interface RemediationInfo {
+  summary: string;
+  steps: string[];
+  effort: "low" | "medium" | "high";
+  impact: "low" | "medium" | "high";
+  ref: string;
+}
+
+// ── Scan Config ──
+
+export interface ScanConfig {
+  checks: {
+    securityTxt: boolean;
+    headers: boolean;
+    spf: boolean;
+    dmarc: boolean;
+    dkim: boolean;
+    dnssec: boolean;
+    caa: boolean;
+    mx: boolean;
+    ns: boolean;
+    ssl: boolean;
+    domainExpiry: boolean;
+    blacklist: boolean;
+    ctLogs: boolean;
+    redirects: boolean;
+    seo: boolean;
+    reputation: boolean;
+    danglingDns: boolean;
+  };
+  noCache: boolean;
+  crtShFirst?: boolean;
+  authenticated?: boolean;
+}
+
+export const DEFAULT_SCAN_CONFIG: ScanConfig = {
+  checks: {
+    securityTxt: true, headers: true, spf: true, dmarc: true,
+    dkim: true, dnssec: true, caa: true, mx: true, ns: true,
+    ssl: true, domainExpiry: true, blacklist: true, ctLogs: true,
+    redirects: true, seo: true, reputation: true, danglingDns: true,
+  },
+  noCache: false,
+};
+
+// ── Diff ──
+
+export interface DiffChange {
+  category: string;
+  type: "status_changed" | "value_changed" | "appeared" | "disappeared";
+  field?: string;
+  severity: "critical" | "warn" | "resolved" | "info";
+  previous: unknown;
+  current: unknown;
+  message: string;
+}
+
+export interface DiffResult {
+  hasDiff: boolean;
+  previousScanId: string | null;
+  previousScanDate: string | null;
+  scoreDelta: number;
+  gradeChange: { from: string; to: string } | null;
+  changes: DiffChange[];
+  summary: {
+    newIssues: number;
+    resolvedIssues: number;
+    valueChanges: number;
+    totalChanges: number;
+  };
+}
+
+// ── Extended API response ──
+
+export interface DomainCheckResponseV3 extends DomainCheckResponse {
+  score: ScoreResponse;
+  diff?: DiffResult;
+}
+
+// ── API Error ──
+
+export interface ApiError {
+  error: string;
+  message?: string;
 }
