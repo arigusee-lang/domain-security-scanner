@@ -10,7 +10,6 @@
   let report: {
     domain: string;
     created_at: string;
-    grade: string | null;
     score: number | null;
     result_json: string | null;
   } | null = null;
@@ -58,13 +57,9 @@
         </p>
       </div>
 
-      {#if report.grade && report.score != null}
+      {#if report.score != null}
         <div class="score-section">
-          <ScoreBadge
-            grade={report.grade}
-            score={report.score}
-            breakdown={{}}
-          />
+          <ScoreBadge score={report.score} breakdown={{}} />
         </div>
       {/if}
 

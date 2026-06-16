@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { safeFetch } from "../lib/safeFetch.js";
 import type { ProxyFetchError } from "../types.js";
+import { createLogger } from "../lib/logger.js";
 
+const log = createLogger("fetch");
 const router = Router();
 
 /** Map proxy error codes to HTTP status codes */
@@ -33,7 +35,7 @@ router.get("/", async (req, res) => {
 
     res.json(result);
   } catch (err: any) {
-    console.error("Unexpected error in fetch handler:", err);
+    log.error({ err }, "unexpected error in fetch handler");
     // If the thrown object has an error field, use it
     if (err && typeof err === "object" && err.error) {
       const status = errorStatusMap[err.error] || err.httpStatus || 500;

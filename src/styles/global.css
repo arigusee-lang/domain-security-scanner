@@ -1,5 +1,5 @@
 /* ============================================
-   Global Styles — security.txt validator
+   Global Styles ï¿½ security.txt validator
    ============================================ */
 
 /* --- Design Tokens --- */
@@ -160,4 +160,11 @@ pre {
 ::selection {
   background: rgba(0, 212, 170, 0.25);
   color: var(--color-text);
+}
+
+/* --- Print Styles --- */
+@media print {
+  nav, footer, .dev-toggles, .domain-input-wrapper, .export-buttons { display: none !important; }
+  body { background: white; }
+  .checker-page { max-width: 100%; padding: 0; }
 }

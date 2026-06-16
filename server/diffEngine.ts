@@ -9,22 +9,23 @@ import { calculateScore } from "./scoreCalculator.js";
 /**
  * Classify the severity of a status transition.
  *
- * - critical: pass->fail, warn->fail (security degradation)
- * - warn: pass->warn (potential concern)
- * - resolved: fail->pass, warn->pass, fail->warn (improvement)
- * - info: everything else (same status, info transitions, etc.)
+ * Rules (checked in order):
+ * - same status → info
+ * - anything → fail → critical (regression to failure)
+ * - fail → anything else → resolved (failure cleared)
+ * - anything → warn → warn (mild regression)
+ * - warn → anything else (other than warn) → resolved (warning cleared)
+ * - everything else (pass↔info, etc.) → info
  */
 export function classifySeverity(
   prevStatus: CheckStatus,
   currStatus: CheckStatus,
 ): DiffChange["severity"] {
   if (prevStatus === currStatus) return "info";
-  if (currStatus === "fail" && (prevStatus === "pass" || prevStatus === "warn")) return "critical";
-  if (prevStatus === "pass" && currStatus === "warn") return "warn";
-  if (
-    (prevStatus === "fail" && (currStatus === "pass" || currStatus === "warn")) ||
-    (prevStatus === "warn" && currStatus === "pass")
-  ) return "resolved";
+  if (currStatus === "fail") return "critical";
+  if (prevStatus === "fail") return "resolved";
+  if (currStatus === "warn") return "warn";
+  if (prevStatus === "warn") return "resolved";
   return "info";
 }
 
@@ -68,11 +69,22 @@ function compareSSL(
       message: `SSL certificate validTo changed from "${prev.validTo}" to "${curr.validTo}"` });
   }
   if (prev.daysRemaining !== curr.daysRemaining) {
-    const severity: DiffChange["severity"] =
-      curr.daysRemaining !== null && curr.daysRemaining < 14 ? "critical" : "info";
-    changes.push({ category: "ssl", type: "value_changed", field: "daysRemaining", severity,
-      previous: prev.daysRemaining, current: curr.daysRemaining,
-      message: `SSL certificate expires in ${curr.daysRemaining} days (was ${prev.daysRemaining} days)` });
+    const certReplaced = prev.validTo !== curr.validTo;
+    const sslThresholds = [30, 14, 7];
+    let crossedThreshold = false;
+    for (const t of sslThresholds) {
+      const prevAbove = prev.daysRemaining !== null && prev.daysRemaining > t;
+      const currBelow = curr.daysRemaining !== null && curr.daysRemaining <= t;
+      if (prevAbove && currBelow) { crossedThreshold = true; break; }
+    }
+    if (certReplaced || crossedThreshold) {
+      const severity: DiffChange["severity"] =
+        curr.daysRemaining !== null && curr.daysRemaining < 14 ? "critical"
+          : crossedThreshold ? "warn" : "info";
+      changes.push({ category: "ssl", type: "value_changed", field: "daysRemaining", severity,
+        previous: prev.daysRemaining, current: curr.daysRemaining,
+        message: `SSL certificate expires in ${curr.daysRemaining} days (was ${prev.daysRemaining} days)` });
+    }
   }
   if (!arraysEqual(prev.sans ?? [], curr.sans ?? [])) {
     changes.push({ category: "ssl", type: "value_changed", field: "sans", severity: "info",
@@ -92,8 +104,8 @@ function compareHeaders(
       previous: prev.status, current: curr.status,
       message: `Headers check changed from ${prev.status} to ${curr.status}` });
   }
-  const prevMap = new Map(prev.items.map((h) => [h.name, h]));
-  const currMap = new Map(curr.items.map((h) => [h.name, h]));
+  const prevMap = new Map((prev.items ?? []).map((h) => [h.name, h]));
+  const currMap = new Map((curr.items ?? []).map((h) => [h.name, h]));
   for (const [name, currItem] of currMap) {
     const prevItem = prevMap.get(name);
     if (!prevItem) {
@@ -140,8 +152,8 @@ function compareSPF(
       severity: "warn", previous: prev.record, current: curr.record,
       message: "SPF record text changed" });
   }
-  const prevMechs = prev.mechanisms.map((m) => m.mechanism);
-  const currMechs = curr.mechanisms.map((m) => m.mechanism);
+  const prevMechs = (prev.mechanisms ?? []).map((m) => m.mechanism);
+  const currMechs = (curr.mechanisms ?? []).map((m) => m.mechanism);
   if (!arraysEqual(prevMechs, currMechs)) {
     changes.push({ category: "spf", type: "value_changed", field: "mechanisms",
       severity: "warn", previous: prevMechs, current: currMechs,
@@ -172,8 +184,8 @@ function compareDMARC(
       severity: "warn", previous: prev.record, current: curr.record,
       message: "DMARC record text changed" });
   }
-  const prevTags = new Map(prev.tags.map((t) => [t.tag, t.value]));
-  const currTags = new Map(curr.tags.map((t) => [t.tag, t.value]));
+  const prevTags = new Map((prev.tags ?? []).map((t) => [t.tag, t.value]));
+  const currTags = new Map((curr.tags ?? []).map((t) => [t.tag, t.value]));
   for (const key of ["p", "rua", "pct"]) {
     const pv = prevTags.get(key) ?? null;
     const cv = currTags.get(key) ?? null;
@@ -197,8 +209,8 @@ function compareDKIM(
       previous: prev.status, current: curr.status,
       message: `DKIM check changed from ${prev.status} to ${curr.status}` });
   }
-  const prevMap = new Map(prev.selectors.map((s) => [s.selector, s]));
-  const currMap = new Map(curr.selectors.map((s) => [s.selector, s]));
+  const prevMap = new Map((prev.selectors ?? []).map((s) => [s.selector, s]));
+  const currMap = new Map((curr.selectors ?? []).map((s) => [s.selector, s]));
   for (const [sel, cs] of currMap) {
     const ps = prevMap.get(sel);
     if (!ps) {
@@ -259,7 +271,7 @@ function compareCAA(
       previous: prev.status, current: curr.status,
       message: `CAA check changed from ${prev.status} to ${curr.status}` });
   }
-  if (!arraysEqual(prev.records, curr.records)) {
+  if (!arraysEqual(prev.records ?? [], curr.records ?? [])) {
     changes.push({ category: "caa", type: "value_changed", field: "records",
       severity: "info", previous: prev.records, current: curr.records,
       message: "CAA record list changed" });
@@ -278,8 +290,8 @@ function compareMX(
       previous: prev.status, current: curr.status,
       message: `MX check changed from ${prev.status} to ${curr.status}` });
   }
-  const prevExchanges = prev.records.map((r) => `${r.priority}:${r.exchange}`);
-  const currExchanges = curr.records.map((r) => `${r.priority}:${r.exchange}`);
+  const prevExchanges = (prev.records ?? []).map((r) => `${r.priority}:${r.exchange}`);
+  const currExchanges = (curr.records ?? []).map((r) => `${r.priority}:${r.exchange}`);
   if (!arraysEqual(prevExchanges, currExchanges)) {
     changes.push({ category: "mx", type: "value_changed", field: "records",
       severity: "info", previous: prev.records, current: curr.records,
@@ -299,8 +311,8 @@ function compareNS(
       previous: prev.status, current: curr.status,
       message: `NS check changed from ${prev.status} to ${curr.status}` });
   }
-  const prevSorted = [...prev.nameservers].sort();
-  const currSorted = [...curr.nameservers].sort();
+  const prevSorted = [...(prev.nameservers ?? [])].sort();
+  const currSorted = [...(curr.nameservers ?? [])].sort();
   if (!arraysEqual(prevSorted, currSorted)) {
     changes.push({ category: "ns", type: "value_changed", field: "nameservers",
       severity: "info", previous: prev.nameservers, current: curr.nameservers,
@@ -320,8 +332,8 @@ function compareBlacklist(
       previous: prev.status, current: curr.status,
       message: `Blacklist check changed from ${prev.status} to ${curr.status}` });
   }
-  const prevMap = new Map(prev.providers.map((p) => [p.provider, p.listed]));
-  const currMap = new Map(curr.providers.map((p) => [p.provider, p.listed]));
+  const prevMap = new Map((prev.providers ?? []).map((p) => [p.provider, p.listed]));
+  const currMap = new Map((curr.providers ?? []).map((p) => [p.provider, p.listed]));
   for (const [provider, listed] of currMap) {
     const wasListed = prevMap.get(provider);
     if (wasListed === undefined) continue;
@@ -393,10 +405,10 @@ function compareDanglingDns(
       message: `Dangling DNS check changed from ${prev.status} to ${curr.status}` });
   }
   const prevDangling = new Set(
-    prev.records.filter((r) => !r.resolves).map((r) => `${r.type}:${r.hostname}`),
+    (prev.records ?? []).filter((r) => !r.resolves).map((r) => `${r.type}:${r.hostname}`),
   );
   const currDangling = new Set(
-    curr.records.filter((r) => !r.resolves).map((r) => `${r.type}:${r.hostname}`),
+    (curr.records ?? []).filter((r) => !r.resolves).map((r) => `${r.type}:${r.hostname}`),
   );
   for (const key of currDangling) {
     if (!prevDangling.has(key)) {
@@ -432,6 +444,7 @@ function compareDomainExpiry(
       message: `Domain expiration date changed from "${prev.expirationDate}" to "${curr.expirationDate}"` });
   }
   if (prev.daysRemaining !== curr.daysRemaining) {
+    const expiryRenewed = prev.expirationDate !== curr.expirationDate;
     const thresholds = [60, 30, 14];
     let crossedThreshold = false;
     for (const t of thresholds) {
@@ -439,10 +452,12 @@ function compareDomainExpiry(
       const currBelow = curr.daysRemaining !== null && curr.daysRemaining <= t;
       if (prevAbove && currBelow) { crossedThreshold = true; break; }
     }
-    changes.push({ category: "domainExpiry", type: "value_changed", field: "daysRemaining",
-      severity: crossedThreshold ? "warn" : "info",
-      previous: prev.daysRemaining, current: curr.daysRemaining,
-      message: `Domain expires in ${curr.daysRemaining} days (was ${prev.daysRemaining} days)` });
+    if (expiryRenewed || crossedThreshold) {
+      changes.push({ category: "domainExpiry", type: "value_changed", field: "daysRemaining",
+        severity: crossedThreshold ? "warn" : "info",
+        previous: prev.daysRemaining, current: curr.daysRemaining,
+        message: `Domain expires in ${curr.daysRemaining} days (was ${prev.daysRemaining} days)` });
+    }
   }
   return changes;
 }
@@ -466,8 +481,8 @@ function compareRedirects(
         ? "HTTPS redirect is now enforced"
         : "HTTPS redirect is no longer enforced" });
   }
-  const prevChecks = prev.items.map((i) => `${i.check}:${i.status}`);
-  const currChecks = curr.items.map((i) => `${i.check}:${i.status}`);
+  const prevChecks = (prev.items ?? []).map((i) => `${i.check}:${i.status}`);
+  const currChecks = (curr.items ?? []).map((i) => `${i.check}:${i.status}`);
   if (!arraysEqual(prevChecks, currChecks)) {
     changes.push({ category: "redirects", type: "value_changed", field: "items",
       severity: "info", previous: prevChecks, current: currChecks,
@@ -517,7 +532,6 @@ export function computeDiff(
       previousScanId: null,
       previousScanDate: null,
       scoreDelta: 0,
-      gradeChange: null,
       changes: [],
       summary: { newIssues: 0, resolvedIssues: 0, valueChanges: 0, totalChanges: 0 },
     };
@@ -544,16 +558,13 @@ export function computeDiff(
   // Compare score
   const prevScore = calculateScore(previous);
   const currScore = calculateScore(current);
-  const scoreDelta = Math.round((currScore.total - prevScore.total) * 100) / 100;
+  const scoreDelta = currScore.total - prevScore.total;
 
-  let gradeChange: DiffResult["gradeChange"] = null;
-  if (prevScore.grade !== currScore.grade) {
-    gradeChange = { from: prevScore.grade, to: currScore.grade };
-    const severity: DiffChange["severity"] =
-      currScore.total < prevScore.total ? "critical" : "resolved";
-    allChanges.push({ category: "score", type: "value_changed", field: "grade",
-      severity, previous: prevScore.grade, current: currScore.grade,
-      message: `Security grade changed from ${prevScore.grade} to ${currScore.grade} (${scoreDelta > 0 ? "+" : ""}${scoreDelta} points)` });
+  if (scoreDelta !== 0) {
+    const severity: DiffChange["severity"] = scoreDelta < 0 ? "warn" : "info";
+    allChanges.push({ category: "score", type: "value_changed", field: "score",
+      severity, previous: prevScore.total, current: currScore.total,
+      message: `Security score changed from ${prevScore.total} to ${currScore.total} (${scoreDelta > 0 ? "+" : ""}${scoreDelta} points)` });
   }
 
   const newIssues = allChanges.filter((c) => c.severity === "critical" || c.severity === "warn").length;
@@ -565,7 +576,6 @@ export function computeDiff(
     previousScanId: null, // Caller sets this from the scan row
     previousScanDate: previous.timestamp ?? null,
     scoreDelta,
-    gradeChange,
     changes: allChanges,
     summary: { newIssues, resolvedIssues, valueChanges, totalChanges: allChanges.length },
   };

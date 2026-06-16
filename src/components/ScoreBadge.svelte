@@ -1,15 +1,15 @@
 <script lang="ts">
-  export let grade: string = '';
   export let score: number = 0;
   export let breakdown: Record<string, { earned: number; max: number }> = {};
 
   let showTooltip = false;
 
-  $: gradeColor = (() => {
-    if (grade === 'A+' || grade === 'A') return 'green';
-    if (grade === 'B') return 'blue';
-    if (grade === 'C') return 'yellow';
-    if (grade === 'D') return 'orange';
+  $: roundedScore = Math.round(score);
+  $: scoreColor = (() => {
+    if (roundedScore >= 85) return 'green';
+    if (roundedScore >= 70) return 'blue';
+    if (roundedScore >= 55) return 'yellow';
+    if (roundedScore >= 35) return 'orange';
     return 'red';
   })();
 
@@ -24,11 +24,11 @@
   on:blur={() => (showTooltip = false)}
   role="button"
   tabindex="0"
-  aria-label="Security grade {grade}, score {score} out of 100"
+  aria-label="Security score {roundedScore} out of 100"
 >
-  <div class="badge {gradeColor}">
-    <span class="grade">{grade}</span>
-    <span class="score">{score}/100</span>
+  <div class="badge {scoreColor}">
+    <span class="score-value">{roundedScore}</span>
+    <span class="score-out-of">/ 100</span>
   </div>
 
   {#if showTooltip && breakdownEntries.length > 0}
@@ -70,15 +70,15 @@
   .badge.orange { color: #f0883e; }
   .badge.red { color: var(--color-error); }
 
-  .grade {
-    font-size: 1.4rem;
+  .score-value {
+    font-size: 1.6rem;
     font-weight: 700;
     line-height: 1;
   }
 
-  .score {
+  .score-out-of {
     font-size: 0.65rem;
-    opacity: 0.8;
+    opacity: 0.7;
     margin-top: 2px;
   }
 

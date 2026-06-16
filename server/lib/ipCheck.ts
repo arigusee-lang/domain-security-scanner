@@ -1,6 +1,9 @@
 /**
  * Checks whether an IP address falls within private/reserved ranges.
  * Blocks RFC 1918, loopback, link-local, and IPv6 equivalents.
+ *
+ * Exported for callers that already hold an IP (e.g. per-IP TLS probes from
+ * a multi-resolver DNS sweep) and don't want to re-resolve via assertSafeHostname.
  */
 export function isBlockedIp(ip: string): boolean {
   // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
@@ -77,6 +80,7 @@ function isBlockedIpv6(ip: string): boolean {
 
 import dns from "node:dns/promises";
 import tls from "node:tls";
+import { safeResolve } from "./dnsResolve.js";
 
 /**
  * Resolves a hostname and verifies none of its IPs are in blocked ranges.
@@ -86,8 +90,8 @@ import tls from "node:tls";
 export async function assertSafeHostname(hostname: string): Promise<void> {
   let addresses: string[];
   try {
-    const v4 = await dns.resolve4(hostname).catch(() => [] as string[]);
-    const v6 = await dns.resolve6(hostname).catch(() => [] as string[]);
+    const v4 = await safeResolve(() => dns.resolve4(hostname), 4000).catch(() => [] as string[]);
+    const v6 = await safeResolve(() => dns.resolve6(hostname), 4000).catch(() => [] as string[]);
     addresses = [...v4, ...v6];
   } catch {
     const err = new Error("Could not resolve domain.");
@@ -200,10 +204,7 @@ export async function warmDns(hostname: string, timeoutMs = 5000): Promise<strin
   const cached = _dnsWarmCache.get(hostname);
   if (cached && Date.now() - cached.ts < DNS_WARM_TTL) return cached.ip;
   try {
-    const result = await Promise.race([
-      dns.resolve4(hostname),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("dns warmup timeout")), timeoutMs)),
-    ]);
+    const result = await safeResolve(() => dns.resolve4(hostname), timeoutMs);
     const ip = result?.[0] ?? null;
     _dnsWarmCache.set(hostname, { ip, ts: Date.now() });
     return ip;

@@ -1,5 +1,10 @@
 ﻿const API = "/api/domain-check";
 
+interface GetResult {
+  data: any;
+  cacheAgeMs: number | null;
+}
+
 async function get(
   path: string,
   domain: string,
@@ -7,7 +12,7 @@ async function get(
   timeoutMs: number,
   scanId?: string,
   extra?: string,
-): Promise<any> {
+): Promise<GetResult | null> {
   const nc = noCache ? "&noCache=1" : "";
   const sid = scanId ? `&scanId=${scanId}` : "";
   const ex = extra || "";
@@ -19,10 +24,12 @@ async function get(
       { signal: controller.signal, credentials: "include" },
     );
     if (!res.ok) {
-      const data = await res.json().catch(() => null);
-      throw new Error(data?.message || `HTTP ${res.status}`);
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.message || `HTTP ${res.status}`);
     }
-    return await res.json();
+    const ageHeader = res.headers.get("X-Cache-Age-Ms");
+    const cacheAgeMs = ageHeader !== null ? parseInt(ageHeader, 10) : null;
+    return { data: await res.json(), cacheAgeMs: Number.isFinite(cacheAgeMs as number) ? cacheAgeMs : null };
   } catch (err: any) {
     if (err.name === "AbortError") return null;
     throw err;
@@ -33,13 +40,13 @@ async function get(
 
 export interface CheckGroup {
   key: string;
-  promise: Promise<any>;
+  promise: Promise<GetResult | null>;
 }
 
 export function runAllChecks(
   domain: string,
   noCache: boolean,
-  onResult: (key: string, data: any) => void,
+  onResult: (key: string, data: any, cacheAgeMs: number | null) => void,
   onError: (key: string, err: any) => void,
   scanId?: string,
   crtShFirst?: boolean,
@@ -48,17 +55,14 @@ export function runAllChecks(
   const groups: CheckGroup[] = [
     { key: "dns", promise: get("dns", domain, noCache, 20000, scanId) },
     { key: "web", promise: get("web", domain, noCache, 30000, scanId) },
-    { key: "expiry", promise: get("expiry", domain, noCache, 18000, scanId) },
-    { key: "ct", promise: get("ct", domain, noCache, 45000, scanId, ctExtra) },
-    { key: "redirects", promise: get("redirects", domain, noCache, 18000, scanId) },
-    { key: "seo", promise: get("seo", domain, noCache, 18000, scanId) },
-    { key: "reputation", promise: get("reputation", domain, noCache, 12000, scanId) },
+    { key: "http", promise: get("http", domain, noCache, 25000, scanId) },
+    { key: "external", promise: get("external", domain, noCache, 50000, scanId, ctExtra) },
   ];
 
   const all = groups.map(g =>
     g.promise
-      .then(data => {
-        if (data) onResult(g.key, data);
+      .then(result => {
+        if (result) onResult(g.key, result.data, result.cacheAgeMs);
         else onError(g.key, new Error("Request timed out"));
       })
       .catch(err => onError(g.key, err))

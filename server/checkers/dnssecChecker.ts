@@ -1,4 +1,7 @@
 import type { DnssecResult } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("upstream");
 
 export async function checkDnssec(domain: string, timeout: number = 5000): Promise<DnssecResult> {
   try {
@@ -11,6 +14,7 @@ export async function checkDnssec(domain: string, timeout: number = 5000): Promi
     clearTimeout(timer);
 
     if (!response.ok) {
+      log.warn({ upstream: "doh-google", status: response.status, domain }, "upstream returned non-2xx");
       return { status: "fail", enabled: false, error: "DNS-over-HTTPS request failed" };
     }
 
@@ -23,6 +27,7 @@ export async function checkDnssec(domain: string, timeout: number = 5000): Promi
 
     return { status: "warn", enabled: false };
   } catch (err: any) {
+    log.warn({ upstream: "doh-google", domain, err: err?.name || err?.message || String(err) }, "upstream request failed");
     if (err.name === "AbortError") {
       return { status: "fail", enabled: false, error: "DNS lookup timed out" };
     }

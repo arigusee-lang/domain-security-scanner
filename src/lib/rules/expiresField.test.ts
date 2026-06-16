@@ -59,12 +59,12 @@ describe('checkExpiresField', () => {
     });
   });
 
-  it('reports error for expired date', () => {
+  it('reports warning for expired date', () => {
     const lines = parse(makeInput('2020-01-01T00:00:00Z'));
     const findings = checkExpiresField(lines);
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
-      severity: 'error',
+      severity: 'warning',
       ruleId: 'expires-past',
     });
     expect(findings[0].explanation).toContain('expired');

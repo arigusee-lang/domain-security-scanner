@@ -3,7 +3,8 @@ import crypto from "node:crypto";
 import type Database from "better-sqlite3";
 import { safeFetchWithHeaders } from "../lib/safeFetch.js";
 import { ssrfSafeFetch, ssrfSafeTlsConnect, warmDns } from "../lib/ipCheck.js";
-import { cacheGet, cacheSet } from "../lib/cache.js";
+import { cacheGet, cacheGetWithAge, cacheSet } from "../lib/cache.js";
+import type { Response } from "express";
 import { analyzeHeaders } from "../checkers/headersAnalyzer.js";
 import { checkSpf } from "../checkers/spfChecker.js";
 import { checkDmarc } from "../checkers/dmarcChecker.js";
@@ -12,9 +13,11 @@ import { checkDnssec } from "../checkers/dnssecChecker.js";
 import { checkCaa } from "../checkers/caaChecker.js";
 import { checkMx } from "../checkers/mxChecker.js";
 import { checkNs } from "../checkers/nsChecker.js";
-import { analyzeSsl, analyzeSslDeep } from "../checkers/sslChecker.js";
+import { analyzeSsl, analyzeSslDeep, applyManagedCertPolicy } from "../checkers/sslChecker.js";
+import { probeMultiEdge } from "../lib/tlsEdgeProbe.js";
 import { checkDomainExpiry } from "../checkers/domainExpiryChecker.js";
 import { checkBlacklist } from "../checkers/blacklistChecker.js";
+import { checkInfrastructure } from "../checkers/infrastructureChecker.js";
 import { checkCtLogs } from "../checkers/ctLogsChecker.js";
 import { checkRedirects } from "../checkers/redirectChecker.js";
 import { checkSeo } from "../checkers/seoChecker.js";
@@ -22,25 +25,40 @@ import { checkSafeBrowsing } from "../checkers/safeBrowsingChecker.js";
 import { checkUrlhaus } from "../checkers/urlhausChecker.js";
 import { checkDanglingDns } from "../checkers/danglingDnsChecker.js";
 import { parse } from "../../src/lib/parser.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("domain-check");
 import { validate } from "../../src/lib/validator.js";
 import { calculateScore } from "../scoreCalculator.js";
 import { getRemediation } from "../remediations.js";
 import { computeDiff } from "../diffEngine.js";
 import type { ScanConfig, DomainCheckResponse, CheckStatus, CtCheckOptions } from "../types.js";
 import { DEFAULT_SCAN_CONFIG } from "../types.js";
+import { runDomainScan, type ProgressEvent, type ScanSection } from "../lib/scanPipeline.js";
 
 const DNS_TIMEOUT = 8000;
 const HTTP_TIMEOUT = 15000;
-const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_TTL = 15 * 60 * 1000;
 
-/** Helper: run a checker with caching */
-async function cached<T>(key: string, noCache: boolean, fn: () => Promise<T>): Promise<T> {
+/**
+ * Helper: run a checker with caching.
+ * If `res` is provided and a cache hit occurs, sets the `X-Cache-Age-Ms` header
+ * to the maximum (oldest) age across all hits in this response — i.e. the
+ * staleness ceiling of the data the client is about to render.
+ */
+async function cached<T>(key: string, noCache: boolean, fn: () => Promise<T>, res?: Response): Promise<T> {
   if (!noCache) {
-    const hit = cacheGet<T>(key);
-    if (hit) return hit;
+    const hit = await cacheGetWithAge<T>(key);
+    if (hit) {
+      if (res) {
+        const prev = parseInt((res.getHeader("X-Cache-Age-Ms") as string) || "0", 10);
+        if (hit.ageMs > prev) res.setHeader("X-Cache-Age-Ms", String(hit.ageMs));
+      }
+      return hit.data;
+    }
   }
   const result = await fn();
-  cacheSet(key, result, CACHE_TTL);
+  await cacheSet(key, result, CACHE_TTL);
   return result;
 }
 
@@ -232,18 +250,26 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     const nc = config.noCache;
     const checks = config.checks;
 
+    // Infrastructure (resolve + CDN) runs first — DNSBL needs the primary IP,
+    // and /web's managed-cert detection will read this from cache too.
+    const infrastructure = checks.blacklist
+      ? await cached(`infra:${domain}`, nc, () => checkInfrastructure(domain, DNS_TIMEOUT), res).catch(() => null)
+      : null;
+    const infraIp = infrastructure?.ip ?? null;
+
     const tasks: Promise<any>[] = [];
     const labels: string[] = [];
 
-    if (checks.spf) { tasks.push(cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT))); labels.push("spf"); }
-    if (checks.dmarc) { tasks.push(cached(`dmarc:${domain}`, nc, () => checkDmarc(domain, DNS_TIMEOUT))); labels.push("dmarc"); }
-    if (checks.dkim) { tasks.push(cached(`dkim:${domain}`, nc, () => checkDkim(domain, DNS_TIMEOUT))); labels.push("dkim"); }
-    if (checks.dnssec) { tasks.push(cached(`dnssec:${domain}`, nc, () => checkDnssec(domain, DNS_TIMEOUT))); labels.push("dnssec"); }
-    if (checks.caa) { tasks.push(cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT))); labels.push("caa"); }
-    if (checks.mx) { tasks.push(cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT))); labels.push("mx"); }
-    if (checks.ns) { tasks.push(cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT))); labels.push("ns"); }
-    if (checks.blacklist) { tasks.push(cached(`bl:${domain}`, nc, () => checkBlacklist(domain, DNS_TIMEOUT))); labels.push("blacklist"); }
-    if (checks.danglingDns) { tasks.push(cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT))); labels.push("danglingDns"); }
+    if (checks.spf) { tasks.push(cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT), res)); labels.push("spf"); }
+    if (checks.dmarc) { tasks.push(cached(`dmarc:${domain}`, nc, () => checkDmarc(domain, DNS_TIMEOUT), res)); labels.push("dmarc"); }
+    if (checks.dkim) { tasks.push(cached(`dkim:${domain}`, nc, () => checkDkim(domain, DNS_TIMEOUT), res)); labels.push("dkim"); }
+    if (checks.dnssec) { tasks.push(cached(`dnssec:${domain}`, nc, () => checkDnssec(domain, DNS_TIMEOUT), res)); labels.push("dnssec"); }
+    if (checks.caa) { tasks.push(cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT), res)); labels.push("caa"); }
+    if (checks.mx) { tasks.push(cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT), res)); labels.push("mx"); }
+    if (checks.ns) { tasks.push(cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT), res)); labels.push("ns"); }
+    if (checks.blacklist) { tasks.push(cached(`bl:${domain}`, nc, () => checkBlacklist(domain, infraIp, DNS_TIMEOUT), res)); labels.push("blacklist"); }
+    if (checks.danglingDns) { tasks.push(cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT), res)); labels.push("danglingDns"); }
+    if (checks.domainExpiry) { tasks.push(cached(`exp:${domain}`, nc, () => checkDomainExpiry(domain, HTTP_TIMEOUT), res)); labels.push("domainExpiry"); }
 
     const results = await Promise.allSettled(tasks);
     const x = <T>(s: PromiseSettledResult<T>, f: T): T => s.status === "fulfilled" ? s.value : f;
@@ -256,19 +282,41 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       caa: { status: "fail", records: [], error: "Check failed" },
       mx: { status: "info", records: [] },
       ns: { status: "fail", nameservers: [], error: "Check failed" },
-      blacklist: { status: "info", ip: null, providers: [], error: "Check failed" },
+      blacklist: { status: "info", providers: [], error: "Check failed" },
       danglingDns: { status: "info", records: [], danglingCount: 0, error: "Check failed" },
+      domainExpiry: { status: "info", expirationDate: null, daysRemaining: null, error: "Check failed" },
     };
 
     const response: Record<string, any> = {};
+    if (infrastructure) response.infrastructure = infrastructure;
     labels.forEach((label, i) => {
       response[label] = x(results[i], defaults[label]);
     });
 
+    // ── No-email downgrade ──
+    // If the domain has no MX records (or a Null MX per RFC 7505), email auth
+    // is much less critical. Downgrade SPF/DMARC fail/warn → info with a note.
+    // Spoofing protection still matters, so we don't suppress them entirely.
+    const mx = response.mx;
+    const hasMail = mx ? (mx.records?.length > 0 && !mx.nullMx) : true;
+    if (!hasMail) {
+      const note = mx?.nullMx
+        ? "Domain explicitly rejects email (Null MX, RFC 7505). Email authentication is not required."
+        : "Domain has no MX records and likely does not accept email. SPF/DMARC are optional but still recommended to prevent spoofing.";
+      if (response.spf && (response.spf.status === "fail" || response.spf.status === "warn")) {
+        response.spf.status = "info";
+        response.spf.notice = note;
+      }
+      if (response.dmarc && (response.dmarc.status === "fail" || response.dmarc.status === "warn")) {
+        response.dmarc.status = "info";
+        response.dmarc.notice = note;
+      }
+    }
+
     // Incremental save for authenticated users
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "dns", response); } catch (e) { console.error("[dns] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "dns", response); } catch (e) { log.error({ err: e, section: "dns" }, "saveScanSection error"); }
     }
 
     res.json(response);
@@ -279,86 +327,29 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     const config = parseScanConfig(req.query);
     const nc = config.noCache;
     const checks = config.checks;
-
     const response: Record<string, any> = {};
 
-    // Run security.txt fetch, headers fetch, and TLS check in parallel (only enabled ones)
-    const webTasks: Array<{ label: string; promise: Promise<any> }> = [];
+    // Shared infrastructure (cache key `infra:` — populated by /dns too, so
+    // we usually hit cache here). Needed for multi-edge probe (use real IPs)
+    // and CDN-managed cert detection (cdnProvider hint).
+    const infrastructure = checks.ssl
+      ? await cached(`infra:${domain}`, nc, () => checkInfrastructure(domain, DNS_TIMEOUT), res).catch(() => null)
+      : null;
+    const ipsForProbe = infrastructure?.ips ?? [];
 
-    if (checks.securityTxt || checks.headers || checks.ssl) {
-      // We need the fetch for securityTxt
-      if (checks.securityTxt) {
-        webTasks.push({
-          label: "fetch",
-          promise: cached(`fetch:${domain}`, nc, () => safeFetchWithHeaders(domain, HTTP_TIMEOUT)),
-        });
-      }
-      if (checks.headers) {
-        webTasks.push({
-          label: "headers",
-          promise: cached(`hdrs:${domain}`, nc, async () => {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT);
-            try {
-              const headRes = await ssrfSafeFetch(`https://${domain}/`, {
-                method: "HEAD", signal: controller.signal, redirect: "follow",
-                headers: { "User-Agent": "security-txt-validator/1.0" },
-              });
-              clearTimeout(timer);
-              const h: Record<string, string> = {};
-              headRes.headers.forEach((v, k) => { h[k.toLowerCase()] = v; });
-              return h;
-            } catch { clearTimeout(timer); return null; }
-          }),
-        });
-      }
-      if (checks.ssl) {
-        webTasks.push({
-          label: "tls",
-          promise: cached(`tls:${domain}`, nc, async () => {
-            return new Promise<any>(async (resolve) => {
-              try {
-                const socket = await ssrfSafeTlsConnect({ host: domain, port: 443, servername: domain, timeout: HTTP_TIMEOUT, rejectUnauthorized: false });
-                // TLS connected
-                let detailedCert: any, basicCert: any;
-                try { detailedCert = socket.getPeerCertificate(true); basicCert = socket.getPeerCertificate(false);  } catch (e: any) { console.warn(`[ssl] getPeerCertificate error: ${e?.message}`); detailedCert = null; basicCert = null; }
-                socket.destroy();
-                const cert = detailedCert || basicCert;
-                if (!cert || !cert.valid_from) { resolve(null); return; }
-                const validFrom = new Date(cert.valid_from).toISOString();
-                const validTo = new Date(cert.valid_to).toISOString();
-                const daysRemaining = Math.floor((new Date(cert.valid_to).getTime() - Date.now()) / 86400000);
-                const sans: string[] = cert.subjectaltname ? cert.subjectaltname.split(",").map((s: string) => s.trim().replace(/^DNS:/, "")) : [];
-                let chainCerts: any[] | undefined;
-                try {
-                  if (detailedCert) {
-                    chainCerts = []; let current = detailedCert; const seen = new Set<string>();
-                    while (current && current.fingerprint256 && !seen.has(current.fingerprint256)) {
-                      seen.add(current.fingerprint256);
-                      chainCerts.push({ subject: String(current.subject?.CN || "Unknown"), issuer: String(current.issuer?.O || current.issuer?.CN || "Unknown"), validFrom: new Date(current.valid_from).toISOString(), validTo: new Date(current.valid_to).toISOString(), isSelfSigned: current.subject?.CN === current.issuer?.CN && current.subject?.O === current.issuer?.O, role: "leaf" });
-                      current = current.issuerCertificate;
-                    }
-                  }
-                } catch { chainCerts = undefined; }
-                let rawLeafCert: Buffer | undefined;
-                try { if (basicCert?.raw) rawLeafCert = basicCert.raw; } catch { rawLeafCert = undefined; }
-                resolve({ issuer: String(cert.issuer?.O || cert.issuer?.CN || "Unknown"), subject: String(cert.subject?.CN || "Unknown"), validFrom, validTo, daysRemaining, sans, chainCerts, rawLeafCert });
-              } catch { resolve(null); }
-            });
-          }),
-        });
-      }
-    }
+    // Primary fetch (security.txt + headers + primary TLS cert) and
+    // multi-edge probe run in parallel.
+    const [fr, edgesResult] = await Promise.all([
+      (checks.securityTxt || checks.headers || checks.ssl)
+        ? cached(`webfetch:${domain}`, nc, () => safeFetchWithHeaders(domain, HTTP_TIMEOUT), res)
+        : Promise.resolve(null),
+      checks.ssl && ipsForProbe.length > 0
+        ? cached(`edges:${domain}`, nc, () => probeMultiEdge(domain, ipsForProbe, HTTP_TIMEOUT), res).catch(() => null)
+        : Promise.resolve(null),
+    ]);
 
-    const webResults = await Promise.allSettled(webTasks.map((t) => t.promise));
-    const webMap: Record<string, any> = {};
-    webTasks.forEach((t, i) => {
-      webMap[t.label] = webResults[i].status === "fulfilled" ? (webResults[i] as PromiseFulfilledResult<any>).value : null;
-    });
-
-    // Build security.txt section
+    // Build security.txt
     if (checks.securityTxt) {
-      const fr = webMap.fetch;
       if (fr && fr.success) {
         const parsed = parse(fr.content, { withPgp: true });
         const vr = validate(parsed.lines, {
@@ -377,27 +368,33 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       }
     }
 
-    // Build headers
+    // Build headers (from the same fetch response)
     if (checks.headers) {
-      const rawHeaders = webMap.headers;
-      response.headers = rawHeaders ? await analyzeHeaders(rawHeaders, domain) : { status: "info" as const, items: [] };
+      const rawHeaders = (fr as any)?.responseHeaders || null;
+      response.headers = rawHeaders && Object.keys(rawHeaders).length > 0 ? await analyzeHeaders(rawHeaders) : { status: "info" as const, items: [] };
     }
 
-    // Build SSL
+    // Build SSL (from the same TLS connection)
     if (checks.ssl) {
-      const cert = webMap.tls;
-      if (cert) {
-        const { chainCerts, rawLeafCert, ...certInfo } = cert;
-        response.ssl = analyzeSslDeep(certInfo, chainCerts, rawLeafCert);
+      const tlsCert = (fr as any)?.tlsCert || null;
+      const chainCerts = (fr as any)?.chainCerts;
+      const rawLeafCert = (fr as any)?.rawLeafCert;
+      if (tlsCert) {
+        response.ssl = analyzeSslDeep(tlsCert, chainCerts, rawLeafCert);
       } else {
         response.ssl = analyzeSsl(null);
       }
+      if (edgesResult) {
+        response.ssl.edges = edgesResult;
+      }
+      // We have cdnProvider from shared infrastructure cache, so short-alias
+      // issuer patterns (WE1 / E1) match here just like in /full + batch.
+      applyManagedCertPolicy(response.ssl, infrastructure?.cdnProvider ?? undefined);
     }
 
-    // Incremental save for authenticated users
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "web", response); } catch (e) { console.error("[web] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "web", response); } catch (e) { log.error({ err: e, section: "web" }, "saveScanSection error"); }
     }
 
     res.json(response);
@@ -412,7 +409,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     // Incremental save for authenticated users
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db && expiryResult) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "expiry", expiryResult); } catch (e) { console.error("[expiry] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "expiry", expiryResult); } catch (e) { log.error({ err: e, section: "expiry" }, "saveScanSection error"); }
     }
 
     res.json(expiryResult);
@@ -423,15 +420,19 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     const config = parseScanConfig(req.query);
     
     if (!config.checks.ctLogs) { res.json(null); return; }
+    // Subdomain CT lookup is a premium-tier feature. The flag is part of the
+    // cache key so anonymous results never bleed into a premium request and
+    // vice-versa.
+    const wantSubdomains = req.user?.plan === "premium_plus";
     const ctOpts: CtCheckOptions = {
-      authenticated: !!req.user,
+      authenticated: wantSubdomains,
       crtShFirst: config.crtShFirst ?? false,
     };
-    const ctResult = await cached(`ct:${domain}:${config.crtShFirst ? "crt" : "cs"}`, config.noCache, () => checkCtLogs(domain, ctOpts));
+    const ctResult = await cached(`ct:${domain}:${config.crtShFirst ? "crt" : "cs"}:${wantSubdomains ? "s1" : "s0"}`, config.noCache, () => checkCtLogs(domain, ctOpts));
 
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db && ctResult) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "ct", ctResult); } catch (e) { console.error("[ct] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "ct", ctResult); } catch (e) { log.error({ err: e, section: "ct" }, "saveScanSection error"); }
     }
 
     res.json(ctResult);
@@ -445,7 +446,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
 
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db && redirectsResult) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "redirects", redirectsResult); } catch (e) { console.error("[redirects] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "redirects", redirectsResult); } catch (e) { log.error({ err: e, section: "redirects" }, "saveScanSection error"); }
     }
 
     res.json(redirectsResult);
@@ -459,7 +460,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
 
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db && seoResult) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "seo", seoResult); } catch (e) { console.error("[seo] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "seo", seoResult); } catch (e) { log.error({ err: e, section: "seo" }, "saveScanSection error"); }
     }
 
     res.json(seoResult);
@@ -495,7 +496,81 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     // Incremental save for authenticated users
     const scanId = req.query.scanId as string | undefined;
     if (req.user && scanId && db) {
-      try { saveScanSection(db, scanId, req.user.id, domain, "reputation", response); } catch (e) { console.error("[reputation] saveScanSection error:", e); }
+      try { saveScanSection(db, scanId, req.user.id, domain, "reputation", response); } catch (e) { log.error({ err: e, section: "reputation" }, "saveScanSection error"); }
+    }
+
+    res.json(response);
+  });
+
+  /**
+   * GET /http — Redirects + SEO checks (both make HTTP requests to the target domain)
+   */
+  router.get("/http", async (req, res) => {
+    const domain = req.query.domain as string;
+    const config = parseScanConfig(req.query);
+    const nc = config.noCache;
+    const checks = config.checks;
+    const response: Record<string, any> = {};
+
+    const tasks: Array<{ label: string; promise: Promise<any>; fallback: any }> = [];
+    if (checks.redirects) tasks.push({ label: "redirects", promise: cached(`redir:${domain}`, nc, () => checkRedirects(domain, HTTP_TIMEOUT), res), fallback: { status: "info", httpsRedirect: false, wwwBehavior: null, items: [], error: "Check failed" } });
+    if (checks.seo) tasks.push({ label: "seo", promise: cached(`seo:${domain}`, nc, () => checkSeo(domain, HTTP_TIMEOUT), res), fallback: { status: "info", items: [], error: "Check failed" } });
+
+    const results = await Promise.allSettled(tasks.map(t => t.promise));
+    tasks.forEach((t, i) => {
+      response[t.label] = results[i].status === "fulfilled" ? (results[i] as PromiseFulfilledResult<any>).value : t.fallback;
+    });
+
+    const scanId = req.query.scanId as string | undefined;
+    if (req.user && scanId && db) {
+      try { saveScanSection(db, scanId, req.user.id, domain, "http", response); } catch (e) { log.error({ err: e, section: "http" }, "saveScanSection error"); }
+    }
+
+    res.json(response);
+  });
+
+  /**
+   * GET /external — CT logs + reputation checks (all external API calls)
+   */
+  router.get("/external", async (req, res) => {
+    const domain = req.query.domain as string;
+    const config = parseScanConfig(req.query);
+    const nc = config.noCache;
+    const checks = config.checks;
+    const response: Record<string, any> = {};
+
+    const tasks: Array<{ label: string; promise: Promise<any>; fallback: any }> = [];
+
+    if (checks.ctLogs) {
+      // Try to get CAA and SSL data from cache for CT analysis
+      // If not cached yet (race with /dns), do a quick CAA lookup
+      let caaRecords = (await cacheGet<any>(`caa:${domain}`))?.records;
+      if (!caaRecords) {
+        try { const caaResult = await checkCaa(domain, DNS_TIMEOUT); caaRecords = caaResult.records; } catch { /* best effort */ }
+      }
+      const cachedSsl = await cacheGet<any>(`webfetch:${domain}`);
+      const wantSubdomains = req.user?.plan === "premium_plus";
+      const ctOpts: CtCheckOptions = {
+        authenticated: wantSubdomains,
+        crtShFirst: config.crtShFirst ?? false,
+        caaRecords,
+        sslIssuer: cachedSsl?.tlsCert?.issuer ?? null,
+      };
+      tasks.push({ label: "ct", promise: cached(`ct:${domain}:${config.crtShFirst ? "crt" : "cs"}:${wantSubdomains ? "s1" : "s0"}`, nc, () => checkCtLogs(domain, ctOpts), res), fallback: { status: "info", totalCerts: 0, recentCerts: [], findings: [], source: "none", error: "Check failed" } });
+    }
+    if (checks.reputation) {
+      tasks.push({ label: "safeBrowsing", promise: cached(`sb:${domain}`, nc, () => checkSafeBrowsing(domain, DNS_TIMEOUT), res), fallback: { status: "info", safe: null, threats: [], error: "Check failed" } });
+      tasks.push({ label: "urlhaus", promise: cached(`uh:${domain}`, nc, () => checkUrlhaus(domain, DNS_TIMEOUT), res), fallback: { status: "info", listed: false, urlCount: 0, error: "Check failed" } });
+    }
+
+    const results = await Promise.allSettled(tasks.map(t => t.promise));
+    tasks.forEach((t, i) => {
+      response[t.label] = results[i].status === "fulfilled" ? (results[i] as PromiseFulfilledResult<any>).value : t.fallback;
+    });
+
+    const scanId = req.query.scanId as string | undefined;
+    if (req.user && scanId && db) {
+      try { saveScanSection(db, scanId, req.user.id, domain, "external", response); } catch (e) { log.error({ err: e, section: "external" }, "saveScanSection error"); }
     }
 
     res.json(response);
@@ -505,6 +580,100 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
    * GET /full — Aggregated endpoint that runs all enabled checks, computes score,
    * attaches remediation, auto-saves for authenticated users, and computes diff.
    */
+  /**
+   * GET /stream — Server-Sent Events: wave-based pipeline emits each check
+   * via `event: section` as soon as it completes. The frontend renders
+   * incrementally without waiting for slow checks (CT logs, WHOIS) to block
+   * the fast ones (SPF, headers, primary cert).
+   *
+   * Replaces the old "4 parallel endpoints with cache-read race fallbacks"
+   * (/dns, /web, /http, /external). Those endpoints stay for the batch
+   * scanner and any legacy clients.
+   */
+  router.get("/stream", async (req, res) => {
+    const domain = req.query.domain as string;
+    if (!domain) {
+      res.status(400).json({ error: "invalid_request", message: "domain is required" });
+      return;
+    }
+
+    const config = parseScanConfig(req.query);
+    const scanId = req.query.scanId as string | undefined;
+
+    // SSE headers — flush immediately so the client gets the connection-open
+    // before the first check completes.
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
+    res.flushHeaders?.();
+
+    const aborter = new AbortController();
+    let clientGone = false;
+    req.on("close", () => {
+      clientGone = true;
+      aborter.abort();
+    });
+
+    // Accumulate sections so we can persist a snapshot at the end.
+    const sections: Record<string, any> = {};
+
+    const sendEvent = (event: ProgressEvent) => {
+      if (clientGone) return;
+      try {
+        res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        // best-effort — pipe may be broken if client disconnected mid-write
+      }
+      if (event.type === "section") {
+        sections[event.section] = event.data;
+      }
+    };
+
+    try {
+      await runDomainScan(
+        domain,
+        {
+          noCache: config.noCache,
+          checks: config.checks,
+          premiumPlus: req.user?.plan === "premium_plus",
+          crtShFirst: config.crtShFirst ?? false,
+        },
+        sendEvent,
+        aborter.signal,
+      );
+    } catch (err: any) {
+      log.error({ err: err?.message || err, domain }, "scan pipeline error");
+      if (!clientGone) {
+        try {
+          res.write(`event: error\ndata: ${JSON.stringify({ message: err?.message || "scan failed" })}\n\n`);
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Persist accumulated sections as a flat result for authenticated users.
+    // DomainCheckerPage.loadFromHistory detects flat format via r.spf/r.dmarc.
+    if (!clientGone && req.user && scanId && db && Object.keys(sections).length > 0) {
+      try {
+        const json = JSON.stringify(sections);
+        const existing = db.prepare("SELECT id FROM scans WHERE id = ?").get(scanId);
+        if (existing) {
+          db.prepare("UPDATE scans SET result_json = ? WHERE id = ?").run(json, scanId);
+        } else {
+          db.prepare(
+            "INSERT INTO scans (id, user_id, domain, scan_type, status, result_json, created_at) VALUES (?, ?, ?, 'single', 'running', ?, datetime('now'))",
+          ).run(scanId, req.user.id, domain, json);
+        }
+      } catch (e) {
+        log.error({ err: e, scanId }, "stream persist failed");
+      }
+    }
+
+    if (!clientGone) {
+      try { res.end(); } catch { /* ignore */ }
+    }
+  });
+
   router.get("/full", async (req, res) => {
     const domain = req.query.domain as string;
     if (!domain) {
@@ -518,6 +687,13 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
     const result: Record<string, any> = { domain, timestamp: new Date().toISOString() };
 
     try {
+      // â”€â”€ Infrastructure (blacklist + multi-edge probe both depend on it) â”€â”€
+      const infrastructure = checks.blacklist || checks.ssl
+        ? await cached(`infra:${domain}`, nc, () => checkInfrastructure(domain, DNS_TIMEOUT)).catch(() => null)
+        : null;
+      const infraIp = infrastructure?.ip ?? null;
+      if (infrastructure) result.infrastructure = infrastructure;
+
       // â”€â”€ DNS checks â”€â”€
       const dnsPromises: Array<{ label: string; promise: Promise<any>; fallback: any }> = [];
       if (checks.spf) dnsPromises.push({ label: "spf", promise: cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT)), fallback: { status: "fail", record: null, validations: [], mechanisms: [], dnsLookupCount: 0, error: "Check failed" } });
@@ -527,7 +703,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       if (checks.caa) dnsPromises.push({ label: "caa", promise: cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT)), fallback: { status: "fail", records: [], error: "Check failed" } });
       if (checks.mx) dnsPromises.push({ label: "mx", promise: cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT)), fallback: { status: "info", records: [] } });
       if (checks.ns) dnsPromises.push({ label: "ns", promise: cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT)), fallback: { status: "fail", nameservers: [], error: "Check failed" } });
-      if (checks.blacklist) dnsPromises.push({ label: "blacklist", promise: cached(`bl:${domain}`, nc, () => checkBlacklist(domain, DNS_TIMEOUT)), fallback: { status: "info", ip: null, providers: [], error: "Check failed" } });
+      if (checks.blacklist) dnsPromises.push({ label: "blacklist", promise: cached(`bl:${domain}`, nc, () => checkBlacklist(domain, infraIp, DNS_TIMEOUT)), fallback: { status: "info", providers: [], error: "Check failed" } });
       if (checks.danglingDns) dnsPromises.push({ label: "danglingDns", promise: cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT)), fallback: { status: "info", records: [], danglingCount: 0, error: "Check failed" } });
 
       // â”€â”€ Web checks â”€â”€
@@ -553,6 +729,13 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
         });
       }
       if (checks.ssl) {
+        const ipsForProbe = infrastructure?.ips ?? [];
+        if (ipsForProbe.length > 0) {
+          webPromises.push({
+            label: "edges",
+            promise: cached(`edges:${domain}`, nc, () => probeMultiEdge(domain, ipsForProbe, HTTP_TIMEOUT)),
+          });
+        }
         webPromises.push({
           label: "tls",
           promise: cached(`tls:${domain}`, nc, async () => {
@@ -561,7 +744,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
                 const socket = await ssrfSafeTlsConnect({ host: domain, port: 443, servername: domain, timeout: HTTP_TIMEOUT, rejectUnauthorized: false });
                 // TLS connected
                 let detailedCert: any, basicCert: any;
-                try { detailedCert = socket.getPeerCertificate(true); basicCert = socket.getPeerCertificate(false);  } catch (e: any) { console.warn(`[ssl] getPeerCertificate error: ${e?.message}`); detailedCert = null; basicCert = null; }
+                try { detailedCert = socket.getPeerCertificate(true); basicCert = socket.getPeerCertificate(false);  } catch (e: any) { log.warn({ err: e?.message, section: "ssl" }, "getPeerCertificate error"); detailedCert = null; basicCert = null; }
                 socket.destroy();
                 const cert = detailedCert || basicCert;
                 if (!cert || !cert.valid_from) { resolve(null); return; }
@@ -640,7 +823,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       // Build headers
       if (checks.headers) {
         const rawHeaders = webMap.headers;
-        result.headers = rawHeaders ? await analyzeHeaders(rawHeaders, domain) : { status: "info" as const, items: [] };
+        result.headers = rawHeaders ? await analyzeHeaders(rawHeaders) : { status: "info" as const, items: [] };
       }
 
       // Build SSL
@@ -652,18 +835,23 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
         } else {
           result.ssl = analyzeSsl(null);
         }
+        if (webMap.edges) {
+          result.ssl.edges = webMap.edges;
+        }
+        applyManagedCertPolicy(result.ssl, result.infrastructure?.cdnProvider);
       }
 
       // â”€â”€ CT Logs (second wave — needs SSL and CAA results) â”€â”€
       if (checks.ctLogs) {
+        const wantSubdomains = req.user?.plan === "premium_plus";
         const fullCtOpts: CtCheckOptions = {
-          authenticated: !!req.user,
+          authenticated: wantSubdomains,
           sslIssuer: result.ssl?.issuer ?? null,
           caaRecords: result.caa?.records ?? [],
           crtShFirst: config.crtShFirst ?? false,
         };
         try {
-          result.ctLogs = await cached(`ct:${domain}:${config.crtShFirst ? "crt" : "cs"}`, nc, () => checkCtLogs(domain, fullCtOpts));
+          result.ctLogs = await cached(`ct:${domain}:${config.crtShFirst ? "crt" : "cs"}:${wantSubdomains ? "s1" : "s0"}`, nc, () => checkCtLogs(domain, fullCtOpts));
         } catch {
           result.ctLogs = { status: "info", totalCerts: 0, recentCerts: [], findings: [], source: "none", error: "Check failed" };
         }
@@ -682,10 +870,11 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
         const scanId = crypto.randomUUID();
         const now = new Date().toISOString();
 
-        // Find previous scan for same domain+user for diff
+        // Find previous single-scan for same domain+user for diff.
+        // Single scans diff only against single scans; batch and monitoring history is excluded.
         const previousScan = db.prepare(
           `SELECT id, result_json, created_at FROM scans
-           WHERE user_id = ? AND domain = ? AND status = 'completed'
+           WHERE user_id = ? AND domain = ? AND scan_type = 'single' AND status = 'completed'
            ORDER BY created_at DESC LIMIT 1`
         ).get(req.user.id, domain) as { id: string; result_json: string | null; created_at: string } | undefined;
 
@@ -704,14 +893,13 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
         // Save scan result
         try {
           db.prepare(
-            `INSERT INTO scans (id, user_id, domain, scan_type, status, score, grade, config_json, result_json, changes_json, created_at, completed_at)
-             VALUES (?, ?, ?, 'single', 'completed', ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO scans (id, user_id, domain, scan_type, status, score, config_json, result_json, changes_json, created_at, completed_at)
+             VALUES (?, ?, ?, 'single', 'completed', ?, ?, ?, ?, ?, ?)`
           ).run(
             scanId,
             req.user.id,
             domain,
             score.total,
-            score.grade,
             JSON.stringify(config),
             JSON.stringify(result),
             diff ? JSON.stringify(diff) : null,
@@ -721,7 +909,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
           result.scanId = scanId;
           result.saved = true;
         } catch (err) {
-          console.error("[domain-check] Failed to save scan:", err);
+          log.error({ err }, "failed to save scan");
           result.saved = false;
         }
       }
@@ -732,7 +920,7 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
 
       res.json(result);
     } catch (err) {
-      console.error("[domain-check/full] Error:", err);
+      log.error({ err, route: "full" }, "scan error");
       res.status(500).json({ error: "internal", message: "Scan failed" });
     }
   });
@@ -757,10 +945,10 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       // Calculate score
       const score = calculateScore(results);
 
-      // Find previous scan for diff
+      // Find previous single-scan for diff (single ↔ single only).
       const previousScan = db.prepare(
         `SELECT id, result_json, created_at FROM scans
-         WHERE user_id = ? AND domain = ? AND status = 'completed'
+         WHERE user_id = ? AND domain = ? AND scan_type = 'single' AND status = 'completed'
          ORDER BY created_at DESC LIMIT 1`
       ).get(req.user.id, domain) as { id: string; result_json: string | null; created_at: string } | undefined;
 
@@ -778,13 +966,13 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       const scanId = crypto.randomUUID();
       const now = new Date().toISOString();
       db.prepare(
-        `INSERT INTO scans (id, user_id, domain, scan_type, status, score, grade, result_json, changes_json, created_at, completed_at)
-         VALUES (?, ?, ?, 'single', 'completed', ?, ?, ?, ?, ?, ?)`
-      ).run(scanId, req.user.id, domain, score.total, score.grade, JSON.stringify(results), diff ? JSON.stringify(diff) : null, now, now);
+        `INSERT INTO scans (id, user_id, domain, scan_type, status, score, result_json, changes_json, created_at, completed_at)
+         VALUES (?, ?, ?, 'single', 'completed', ?, ?, ?, ?, ?)`
+      ).run(scanId, req.user.id, domain, score.total, JSON.stringify(results), diff ? JSON.stringify(diff) : null, now, now);
 
       res.json({ scanId, score, diff, saved: true });
     } catch (err) {
-      console.error("[domain-check/save] Error:", err);
+      log.error({ err, route: "save" }, "scan error");
       res.status(500).json({ error: "internal" });
     }
   });
@@ -817,36 +1005,56 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       const resultJson = JSON.parse(scan.result_json || "{}");
 
       // Flatten the section-grouped result_json into a DomainCheckResponse-like shape for scoring
-      // dns section contains: spf, dmarc, dkim, dnssec, caa, mx, ns, blacklist, danglingDns
+      // dns section contains: spf, dmarc, dkim, dnssec, caa, mx, ns, blacklist, danglingDns, domainExpiry
       // web section contains: securityTxt, headers, ssl
-      // expiry section is the domainExpiry result directly
-      // ct section is the ctLogs result directly
-      // reputation section contains: safeBrowsing, urlhaus
+      // http section contains: redirects, seo
+      // external section contains: ct, safeBrowsing, urlhaus
       const flat: Record<string, any> = {
         domain: scan.domain,
         timestamp: new Date().toISOString(),
       };
 
       if (resultJson.dns) {
-        Object.assign(flat, resultJson.dns);
+        const { domainExpiry, ...dnsRest } = resultJson.dns;
+        Object.assign(flat, dnsRest);
+        if (domainExpiry) flat.domainExpiry = domainExpiry;
       }
       if (resultJson.web) {
         Object.assign(flat, resultJson.web);
       }
+      // Legacy: old scans may have expiry as separate section
       if (resultJson.expiry) {
         flat.domainExpiry = resultJson.expiry;
       }
-      if (resultJson.ct) {
-        flat.ctLogs = resultJson.ct;
+      // New grouped sections
+      if (resultJson.http) {
+        if (resultJson.http.redirects) flat.redirects = resultJson.http.redirects;
+        if (resultJson.http.seo) flat.seo = resultJson.http.seo;
       }
-      if (resultJson.redirects) {
-        flat.redirects = resultJson.redirects;
+      if (resultJson.external) {
+        if (resultJson.external.ct) flat.ctLogs = resultJson.external.ct;
+        if (resultJson.external.safeBrowsing) flat.safeBrowsing = resultJson.external.safeBrowsing;
+        if (resultJson.external.urlhaus) flat.urlhaus = resultJson.external.urlhaus;
       }
-      if (resultJson.seo) {
-        flat.seo = resultJson.seo;
-      }
-      if (resultJson.reputation) {
-        Object.assign(flat, resultJson.reputation);
+      // Legacy: old scans may have these as separate sections
+      if (resultJson.ct) flat.ctLogs = resultJson.ct;
+      if (resultJson.redirects) flat.redirects = resultJson.redirects;
+      if (resultJson.seo) flat.seo = resultJson.seo;
+      if (resultJson.reputation) Object.assign(flat, resultJson.reputation);
+
+      // Top-level flat format from the SSE pipeline — each check saved under
+      // its own key (r.spf, r.ssl, r.ctLogs, ...). Copy any keys not already
+      // populated by the section-grouped or legacy branches above.
+      const FLAT_KEYS = [
+        "spf", "dmarc", "dkim", "dnssec", "caa", "mx", "ns",
+        "blacklist", "danglingDns", "infrastructure",
+        "securityTxt", "headers", "ssl",
+        "redirects", "seo",
+        "safeBrowsing", "urlhaus", "ctLogs",
+        "domainExpiry",
+      ];
+      for (const k of FLAT_KEYS) {
+        if (resultJson[k] && !(k in flat)) flat[k] = resultJson[k];
       }
 
       // Calculate score
@@ -855,10 +1063,10 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       // Attach remediations
       attachRemediations(flat);
 
-      // Find previous completed scan for diff
+      // Find previous single-scan for diff (single ↔ single only; exclude batch/monitoring history).
       const previousScan = db.prepare(
         `SELECT id, result_json, created_at FROM scans
-         WHERE user_id = ? AND domain = ? AND status = 'completed' AND id != ?
+         WHERE user_id = ? AND domain = ? AND scan_type = 'single' AND status = 'completed' AND id != ?
          ORDER BY created_at DESC LIMIT 1`
       ).get(req.user.id, scan.domain, scanId) as
         | { id: string; result_json: string | null; created_at: string } | undefined;
@@ -889,14 +1097,13 @@ export function createDomainCheckRoutes({ db }: DomainCheckDeps): Router {
       }
 
       const now = new Date().toISOString();
-      // Update the scan row: store the flattened result, score, grade, diff, status
       db.prepare(
-        `UPDATE scans SET status = 'completed', score = ?, grade = ?, result_json = ?, changes_json = ?, completed_at = ? WHERE id = ?`
-      ).run(score.total, score.grade, JSON.stringify(flat), diff ? JSON.stringify(diff) : null, now, scanId);
+        `UPDATE scans SET status = 'completed', score = ?, result_json = ?, changes_json = ?, completed_at = ? WHERE id = ?`
+      ).run(score.total, JSON.stringify(flat), diff ? JSON.stringify(diff) : null, now, scanId);
 
       res.json({ scanId, score, diff, saved: true });
     } catch (err) {
-      console.error("[domain-check/finalize] Error:", err);
+      log.error({ err, route: "finalize" }, "scan error");
       res.status(500).json({ error: "internal" });
     }
   });

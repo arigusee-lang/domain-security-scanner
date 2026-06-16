@@ -1,6 +1,9 @@
 import type { DiffChange, NotificationLogRow } from "./types.js";
 import type Database from "better-sqlite3";
 import crypto from "node:crypto";
+import { createLogger } from "./lib/logger.js";
+
+const log = createLogger("notification");
 
 /**
  * Payload for sending a change notification email.
@@ -10,10 +13,9 @@ export interface NotificationPayload {
   to: string;
   domain: string;
   scanId: string | null;
-  scheduledId: string | null;
   scanDate: string;
-  currentGrade: string;
-  previousGrade: string | null;
+  currentScore: number;
+  previousScore: number | null;
   scoreDelta: number;
   changes: DiffChange[];
   reportUrl: string;
@@ -54,12 +56,12 @@ function buildSubject(domain: string, changes: DiffChange[]): string {
  * Build HTML email body.
  */
 function buildHtmlBody(payload: NotificationPayload, unsubscribeUrl: string): string {
-  const { domain, scanDate, currentGrade, previousGrade, scoreDelta, changes, reportUrl } =
+  const { domain, scanDate, currentScore, previousScore, scoreDelta, changes, reportUrl } =
     payload;
 
-  const gradeInfo = previousGrade
-    ? `Grade: <strong>${currentGrade}</strong> (was ${previousGrade}) — Score delta: ${scoreDelta > 0 ? "+" : ""}${scoreDelta}`
-    : `Grade: <strong>${currentGrade}</strong>`;
+  const scoreInfo = previousScore !== null
+    ? `Score: <strong>${currentScore}</strong> (was ${previousScore}) — delta: ${scoreDelta > 0 ? "+" : ""}${scoreDelta}`
+    : `Score: <strong>${currentScore}</strong>`;
 
   const newIssues = changes.filter(
     (c) => c.severity === "critical" || c.severity === "warn"
@@ -84,7 +86,7 @@ function buildHtmlBody(payload: NotificationPayload, unsubscribeUrl: string): st
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h2>Domain Security Report — ${escapeHtml(domain)}</h2>
   <p>Scan date: ${escapeHtml(scanDate)}</p>
-  <p>${gradeInfo}</p>
+  <p>${scoreInfo}</p>
   ${issuesHtml}
   ${resolvedHtml}
   <p style="margin-top: 20px;">
@@ -92,7 +94,7 @@ function buildHtmlBody(payload: NotificationPayload, unsubscribeUrl: string): st
   </p>
   <hr style="margin-top: 30px; border: none; border-top: 1px solid #e5e7eb;">
   <p style="font-size: 12px; color: #6b7280;">
-    You received this because you have scheduled scans enabled.
+    You received this because you have notifications enabled.
     <a href="${escapeHtml(unsubscribeUrl)}">Unsubscribe / Manage notifications</a>
   </p>
 </body>
@@ -103,12 +105,12 @@ function buildHtmlBody(payload: NotificationPayload, unsubscribeUrl: string): st
  * Build plain text email body.
  */
 function buildTextBody(payload: NotificationPayload, unsubscribeUrl: string): string {
-  const { domain, scanDate, currentGrade, previousGrade, scoreDelta, changes, reportUrl } =
+  const { domain, scanDate, currentScore, previousScore, scoreDelta, changes, reportUrl } =
     payload;
 
-  const gradeInfo = previousGrade
-    ? `Grade: ${currentGrade} (was ${previousGrade}) — Score delta: ${scoreDelta > 0 ? "+" : ""}${scoreDelta}`
-    : `Grade: ${currentGrade}`;
+  const scoreInfo = previousScore !== null
+    ? `Score: ${currentScore} (was ${previousScore}) — delta: ${scoreDelta > 0 ? "+" : ""}${scoreDelta}`
+    : `Score: ${currentScore}`;
 
   const newIssues = changes.filter(
     (c) => c.severity === "critical" || c.severity === "warn"
@@ -117,7 +119,7 @@ function buildTextBody(payload: NotificationPayload, unsubscribeUrl: string): st
 
   let text = `Domain Security Report — ${domain}\n`;
   text += `Scan date: ${scanDate}\n`;
-  text += `${gradeInfo}\n\n`;
+  text += `${scoreInfo}\n\n`;
 
   if (newIssues.length > 0) {
     text += `⚠️ New Issues (${newIssues.length}):\n`;
@@ -157,13 +159,12 @@ function insertNotificationLog(
   entry: Omit<NotificationLogRow, "created_at">
 ): void {
   db.prepare(
-    `INSERT INTO notification_log (id, user_id, scan_id, scheduled_id, type, status, payload_json, error, sent_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO notification_log (id, user_id, scan_id, type, status, payload_json, error, sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     entry.id,
     entry.user_id,
     entry.scan_id,
-    entry.scheduled_id,
     entry.type,
     entry.status,
     entry.payload_json,
@@ -191,12 +192,11 @@ export async function sendChangeNotification(
 
   // Check if API key is configured
   if (!apiKey) {
-    console.warn("[notification] RESEND_API_KEY not set — skipping email send");
+    log.warn("RESEND_API_KEY not set — skipping email send");
     insertNotificationLog(db, {
       id: logId,
       user_id: payload.userId,
       scan_id: payload.scanId,
-      scheduled_id: payload.scheduledId,
       type: "email",
       status: "failed",
       payload_json: JSON.stringify({ to: payload.to, domain: payload.domain }),
@@ -209,14 +209,14 @@ export async function sendChangeNotification(
   // Enforce daily limit
   const todayCount = countTodayEmails(db, payload.userId);
   if (todayCount >= DAILY_EMAIL_LIMIT) {
-    console.warn(
-      `[notification] Daily email limit (${DAILY_EMAIL_LIMIT}) reached for user ${payload.userId}`
+    log.warn(
+      { userId: payload.userId, limit: DAILY_EMAIL_LIMIT },
+      "daily email limit reached"
     );
     insertNotificationLog(db, {
       id: logId,
       user_id: payload.userId,
       scan_id: payload.scanId,
-      scheduled_id: payload.scheduledId,
       type: "email",
       status: "failed",
       payload_json: JSON.stringify({ to: payload.to, domain: payload.domain }),
@@ -231,7 +231,6 @@ export async function sendChangeNotification(
     id: logId,
     user_id: payload.userId,
     scan_id: payload.scanId,
-    scheduled_id: payload.scheduledId,
     type: "email",
     status: "pending",
     payload_json: JSON.stringify({
@@ -275,7 +274,7 @@ export async function sendChangeNotification(
     ).run(logId);
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[notification] Failed to send email to ${payload.to}:`, errorMsg);
+    log.error({ err: errorMsg, to: payload.to }, "failed to send email");
 
     // Update log to failed
     db.prepare(

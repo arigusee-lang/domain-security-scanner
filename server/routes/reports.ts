@@ -23,7 +23,6 @@ export function createReportsRoutes({ db }: ReportsDeps): Router {
       domain: report.domain,
       scan_type: report.scan_type,
       score: report.score,
-      grade: report.grade,
       result_json: report.result_json ? JSON.parse(report.result_json) : null,
       changes_json: report.changes_json ? JSON.parse(report.changes_json) : null,
       created_at: report.created_at,

@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import { isBlockedIp, ssrfSafeFetch as ssrfSafeFetchFn, ssrfSafeTlsConnect } from "./ipCheck.js";
+import { safeResolve } from "./dnsResolve.js";
 import type { ProxyFetchResponse, ProxyFetchError } from "../types.js";
 
 const MAX_REDIRECTS = 3;
@@ -32,8 +33,8 @@ function toProxyError(err: any): ProxyFetchError {
 async function resolveAndCheck(hostname: string): Promise<void> {
   let addresses: string[];
   try {
-    const result = await dns.resolve4(hostname).catch(() => []);
-    const result6 = await dns.resolve6(hostname).catch(() => []);
+    const result = await safeResolve(() => dns.resolve4(hostname), 4000).catch(() => [] as string[]);
+    const result6 = await safeResolve(() => dns.resolve6(hostname), 4000).catch(() => [] as string[]);
     addresses = [...result, ...result6];
   } catch {
     throw { error: "dns_failure" as const, message: "Could not resolve domain." };
@@ -211,11 +212,13 @@ import type { TlsCertInfo } from "../types.js";
  * Connects to the domain via TLS and extracts the peer certificate.
  * Uses SSRF-safe connection to block private/reserved IPs.
  */
-async function extractTlsCert(hostname: string, timeoutMs: number): Promise<TlsCertInfo | null> {
+async function extractTlsCert(hostname: string, timeoutMs: number): Promise<{ cert: TlsCertInfo; chainCerts?: any[]; rawLeafCert?: Buffer } | null> {
   try {
     const socket = await ssrfSafeTlsConnect({ host: hostname, port: 443, servername: hostname, timeout: timeoutMs, rejectUnauthorized: false });
-    const cert = socket.getPeerCertificate();
+    let detailedCert: any, basicCert: any;
+    try { detailedCert = socket.getPeerCertificate(true); basicCert = socket.getPeerCertificate(false); } catch { detailedCert = null; basicCert = null; }
     socket.destroy();
+    const cert = detailedCert || basicCert;
     if (!cert || !cert.valid_from) return null;
     const validFrom = new Date(cert.valid_from).toISOString();
     const validTo = new Date(cert.valid_to).toISOString();
@@ -223,14 +226,27 @@ async function extractTlsCert(hostname: string, timeoutMs: number): Promise<TlsC
     const sans: string[] = cert.subjectaltname
       ? cert.subjectaltname.split(",").map((s: string) => s.trim().replace(/^DNS:/, ""))
       : [];
-    return {
+    const tlsCert: TlsCertInfo = {
       issuer: String(cert.issuer?.O || cert.issuer?.CN || "Unknown"),
       subject: String(cert.subject?.CN || "Unknown"),
-      validFrom,
-      validTo,
-      daysRemaining,
-      sans,
+      validFrom, validTo, daysRemaining, sans,
     };
+    // Extract chain
+    let chainCerts: any[] | undefined;
+    try {
+      if (detailedCert) {
+        chainCerts = []; let current = detailedCert; const seen = new Set<string>();
+        while (current && current.fingerprint256 && !seen.has(current.fingerprint256)) {
+          seen.add(current.fingerprint256);
+          chainCerts.push({ subject: String(current.subject?.CN || "Unknown"), issuer: String(current.issuer?.O || current.issuer?.CN || "Unknown"), validFrom: new Date(current.valid_from).toISOString(), validTo: new Date(current.valid_to).toISOString(), isSelfSigned: current.subject?.CN === current.issuer?.CN && current.subject?.O === current.issuer?.O, role: "leaf" });
+          current = current.issuerCertificate;
+        }
+      }
+    } catch { chainCerts = undefined; }
+    // Extract raw leaf cert for SCT parsing
+    let rawLeafCert: Buffer | undefined;
+    try { if (basicCert?.raw) rawLeafCert = basicCert.raw; } catch { rawLeafCert = undefined; }
+    return { cert: tlsCert, chainCerts, rawLeafCert };
   } catch {
     return null;
   }
@@ -244,14 +260,38 @@ export async function safeFetchWithHeaders(
   domain: string,
   timeoutMs: number = 8000
 ): Promise<SafeFetchWithHeadersResponse | ProxyFetchError> {
-  // Run TLS cert extraction in parallel with the normal fetch
-  const [fetchResult, tlsCert] = await Promise.all([
+  const [fetchResult, tlsResult] = await Promise.all([
     safeFetch(domain),
     extractTlsCert(domain, timeoutMs),
   ]);
 
   if (!fetchResult.success) {
-    return fetchResult;
+    // security.txt failed, but still return TLS + headers data
+    let responseHeaders: Record<string, string> = {};
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const headRes = await ssrfSafeFetchFn(`https://${domain}/`, {
+        method: "HEAD",
+        signal: controller.signal,
+        redirect: "follow",
+        headers: { "User-Agent": "security-txt-validator/1.0" },
+      });
+      clearTimeout(timer);
+      headRes.headers.forEach((value: string, key: string) => {
+        responseHeaders[key.toLowerCase()] = value;
+      });
+    } catch { /* best-effort */ }
+
+    return {
+      success: false as const,
+      error: (fetchResult as any).error || "fetch_failed",
+      message: (fetchResult as any).message || "Could not fetch security.txt",
+      responseHeaders,
+      tlsCert: tlsResult?.cert ?? null,
+      chainCerts: tlsResult?.chainCerts,
+      rawLeafCert: tlsResult?.rawLeafCert,
+    };
   }
 
   // Fetch security headers from the domain's root page (not security.txt)
@@ -282,6 +322,8 @@ export async function safeFetchWithHeaders(
     wellKnownFound: fetchResult.wellKnownFound,
     fallbackUsed: fetchResult.fallbackUsed,
     responseHeaders,
-    tlsCert,
+    tlsCert: tlsResult?.cert ?? null,
+    chainCerts: tlsResult?.chainCerts,
+    rawLeafCert: tlsResult?.rawLeafCert,
   };
 }

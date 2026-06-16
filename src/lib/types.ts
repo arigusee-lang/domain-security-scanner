@@ -108,12 +108,17 @@ export interface SpfResult {
   mechanisms: SpfMechanism[];
   dnsLookupCount: number;
   error?: string;
+  notice?: string;
 }
 
 export interface DmarcTag {
   tag: string;
   value: string;
   description: string;
+  /** Per-tag status — set when the tag value is invalid or carries a warning. Absent = ok. */
+  status?: CheckStatus;
+  /** Short human-readable explanation when `status` is warn/fail. */
+  issue?: string;
 }
 
 export interface DmarcValidationItem {
@@ -123,12 +128,30 @@ export interface DmarcValidationItem {
   ref?: string;
 }
 
+export interface DmarcReportUri {
+  /** Original URI as it appears in the record, e.g. "mailto:dmarc@example.com". */
+  uri: string;
+  /** Email address (after `mailto:` and before optional `!size`). Null for non-mailto URIs. */
+  email: string | null;
+  /** Email address domain. Null if URI couldn't be parsed. */
+  domain: string | null;
+  /** True if the URI's domain differs from the DMARC record's domain (and is not a sub-suffix). */
+  external: boolean;
+  /** For external URIs only: did the destination publish `<from>._report._dmarc.<dst>` v=DMARC1? Null if internal or check failed. */
+  authorized: boolean | null;
+}
+
 export interface DmarcResult {
   status: CheckStatus;
   record: string | null;
   validations: DmarcValidationItem[];
   tags: DmarcTag[];
   error?: string;
+  notice?: string;
+  /** Parsed rua URIs with external-destination authorization status. */
+  ruaUris?: DmarcReportUri[];
+  /** Parsed ruf URIs with external-destination authorization status. */
+  rufUris?: DmarcReportUri[];
 }
 
 export interface DkimSelectorResult {
@@ -171,6 +194,10 @@ export interface MxRecord {
 export interface MxResult {
   status: CheckStatus;
   records: MxRecord[];
+  /** True if the domain accepts email — false if there are no MX records or a Null MX (RFC 7505). */
+  hasMail?: boolean;
+  /** RFC 7505 Null MX (single record `0 .`) — explicit "this domain does not accept mail". */
+  nullMx?: boolean;
 }
 
 export interface NsResult {
@@ -217,6 +244,31 @@ export interface CtPolicyResult {
   findings: CtPolicyFinding[];
 }
 
+/** One observed certificate from a single edge IP (multi-IP TLS probe). */
+export interface TlsEdgeSample {
+  ip: string;
+  fingerprint: string;
+  issuer: string;
+  notAfter: string;
+  daysRemaining: number;
+  sanMatch: boolean;
+  chainOk: boolean;
+  error?: string;
+}
+
+export type TlsEdgesConsistency = "consistent" | "rollout" | "inconsistent" | "unknown";
+
+export interface TlsEdgesResult {
+  samples: TlsEdgeSample[];
+  failedIps: string[];
+  distinctFingerprints: number;
+  minDaysRemaining: number | null;
+  maxDaysRemaining: number | null;
+  allSanMatch: boolean;
+  allChainOk: boolean;
+  consistency: TlsEdgesConsistency;
+}
+
 export interface SslResult {
   status: CheckStatus;
   issuer: string | null;
@@ -232,6 +284,10 @@ export interface SslResult {
   chainStatus?: CheckStatus;
   chainIssues?: ChainIssue[];
   ct?: CtPolicyResult;
+  /** Multi-IP edge probe — set when we sampled cert from each resolved IP separately. */
+  edges?: TlsEdgesResult;
+  /** Name of the CDN/cloud provider that auto-rotates this cert, or null if self-managed. */
+  managedBy?: string | null;
 }
 
 export interface DomainExpiryResult {
@@ -248,10 +304,19 @@ export interface DnsblProviderResult {
   type: "ip" | "domain";
 }
 
+/** Infrastructure (resolve + CDN detect) — distinct from DNSBL. */
+export interface InfrastructureResult {
+  ip: string | null;
+  ips: string[];
+  resolverCount: number;
+  cdnProvider: string | null;
+  cdnProviders: string[];
+  error?: string;
+}
+
+/** DNSBL only. Historical fields (ip, cdnProvider, ips, ...) moved to InfrastructureResult. */
 export interface BlacklistResult {
   status: CheckStatus;
-  ip: string | null;
-  cdnProvider?: string;
   providers: DnsblProviderResult[];
   error?: string;
 }
@@ -311,7 +376,7 @@ export interface CtFinding {
   subdomain?: string;
 }
 
-export type CtDataSource = "crt.sh" | "certspotter" | "cache" | "none";
+export type CtDataSource = "crt.sh" | "certspotter" | "none";
 
 export interface CtLogsResult {
   status: CheckStatus;
@@ -322,6 +387,10 @@ export interface CtLogsResult {
   source: CtDataSource;
   fromCache?: boolean;
   cachedAt?: string;
+  // Set when both upstream CT sources failed and we returned an entry past its
+  // freshness window. `staleSeconds` is the age of that entry in seconds.
+  stale?: boolean;
+  staleSeconds?: number;
   error?: string;
 }
 

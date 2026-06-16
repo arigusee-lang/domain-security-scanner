@@ -5,7 +5,8 @@ export interface AuthUser {
   email: string;
   name: string | null;
   avatarUrl: string | null;
-  plan: 'registered' | 'pro' | 'enterprise';
+  plan: 'free' | 'premium' | 'premium_plus';
+  role: 'user' | 'admin';
 }
 
 export const currentUser = writable<AuthUser | null>(null);

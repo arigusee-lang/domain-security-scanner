@@ -6,6 +6,9 @@ import { requireAuth } from "../middleware/authMiddleware.js";
 import { requirePlan } from "../middleware/planGating.js";
 import { generateSecret, deliverWebhook } from "../webhookService.js";
 import type { WebhookRow, WebhookDeliveryRow } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("webhooks");
 
 interface WebhooksDeps {
   db: Database.Database;
@@ -13,15 +16,15 @@ interface WebhooksDeps {
 }
 
 const WEBHOOK_LIMITS: Record<string, number> = {
-  pro: 3,
-  enterprise: 5,
+  premium: 3,
+  premium_plus: 5,
 };
 
 export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
   const router = Router();
 
   // POST /api/webhooks — create webhook
-  router.post("/", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.post("/", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const plan = req.user!.plan;
     const { url, name, events } = req.body as {
@@ -69,7 +72,7 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
   });
 
   // GET /api/webhooks — list user's webhooks (secret masked)
-  router.get("/", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.get("/", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const webhooks = db
       .prepare("SELECT * FROM webhooks WHERE user_id = ? ORDER BY created_at DESC")
@@ -85,7 +88,7 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
   });
 
   // PUT /api/webhooks/:id — update webhook
-  router.put("/:id", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.put("/:id", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const webhook = db
       .prepare("SELECT * FROM webhooks WHERE id = ? AND user_id = ?")
@@ -119,7 +122,7 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
   });
 
   // DELETE /api/webhooks/:id — delete webhook
-  router.delete("/:id", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.delete("/:id", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const result = db
       .prepare("DELETE FROM webhooks WHERE id = ? AND user_id = ?")
@@ -133,7 +136,7 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
   });
 
   // POST /api/webhooks/:id/test — send test payload
-  router.post("/:id/test", requireAuth, requirePlan("pro", "enterprise"), async (req, res) => {
+  router.post("/:id/test", requireAuth, requirePlan("premium", "premium_plus"), async (req, res) => {
     const userId = req.user!.id;
     const webhook = db
       .prepare("SELECT * FROM webhooks WHERE id = ? AND user_id = ?")
@@ -151,8 +154,6 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
       scan: {
         id: "test-scan-id",
         score: 85,
-        grade: "A",
-        previousGrade: null,
         scoreDelta: 0,
         url: "https://example.com",
       },
@@ -163,13 +164,13 @@ export function createWebhooksRoutes({ db }: WebhooksDeps): Router {
       await deliverWebhook(webhook, "test", testPayload, db);
       res.json({ ok: true, message: "Test payload sent" });
     } catch (err) {
-      console.error("[webhooks] Test delivery failed:", err);
+      log.error({ err }, "test delivery failed");
       res.status(500).json({ error: "delivery_failed", message: "Failed to deliver test payload" });
     }
   });
 
   // GET /api/webhooks/:id/deliveries — last 20 deliveries
-  router.get("/:id/deliveries", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.get("/:id/deliveries", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const webhook = db
       .prepare("SELECT id FROM webhooks WHERE id = ? AND user_id = ?")

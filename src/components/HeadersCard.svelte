@@ -93,7 +93,7 @@
     border-radius: 3px;
     font-size: 0.75rem;
     color: var(--color-text-secondary);
-    word-break: break-all;
+    overflow-wrap: break-word;
   }
 
   .header-note {

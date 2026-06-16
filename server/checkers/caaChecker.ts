@@ -1,12 +1,13 @@
 import dns from "node:dns/promises";
 import type { CaaResult, CaaRecord } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+import { safeResolve } from "../lib/dnsResolve.js";
+
+const log = createLogger("caa");
 
 export async function checkCaa(domain: string, timeout: number = 5000): Promise<CaaResult> {
   try {
-    const result = await Promise.race([
-      dns.resolveCaa(domain),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
-    ]);
+    const result = await safeResolve(() => dns.resolveCaa(domain), timeout);
     if (!result || result.length === 0) {
       return { status: "warn", records: [] };
     }
@@ -26,11 +27,13 @@ export async function checkCaa(domain: string, timeout: number = 5000): Promise<
     return { status: "pass", records };
   } catch (err: any) {
     if (err.message === "timeout") {
+      log.warn({ domain }, "DNS lookup timed out");
       return { status: "fail", records: [], error: "DNS lookup timed out" };
     }
     if (err.code === "ENODATA" || err.code === "ENOTFOUND") {
       return { status: "warn", records: [] };
     }
+    log.warn({ domain, err: err?.code || err?.message || err }, "DNS lookup failed");
     return { status: "fail", records: [], error: err.message || "DNS lookup failed" };
   }
 }

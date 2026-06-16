@@ -42,7 +42,13 @@ GITHUB_REDIRECT_URI=https://dn-sec.com/api/auth/github/callback
 RESEND_API_KEY=
 FROM_EMAIL=notifications@dn-sec.com
 
-CRON_SECRET=
+# Logging
+LOG_LEVEL=info
+# Axiom (optional) — vendor-neutral log aggregator, 500 GB/mo free tier.
+# Create dataset at https://app.axiom.co/ and an ingest token, then fill in below.
+# Leave empty to log only to stdout (captured by journalctl).
+AXIOM_DATASET=
+AXIOM_TOKEN=
 EOF
   chown dn-sec:dn-sec /opt/dn-sec/.env
   chmod 600 /opt/dn-sec/.env

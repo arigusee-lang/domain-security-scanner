@@ -9,10 +9,6 @@ const WEIGHTS: Record<string, number> = {
   danglingDns: 5, domainExpiry: 3, securityTxt: 3, mx: 2, ns: 1,
 };
 
-const GRADE_THRESHOLDS: [number, string][] = [
-  [95, "A+"], [85, "A"], [70, "B"], [55, "C"], [35, "D"], [0, "F"],
-];
-
 function statusToPoints(status: string): number {
   if (status === "pass") return 1;
   if (status === "warn") return 0.5;
@@ -20,17 +16,8 @@ function statusToPoints(status: string): number {
   return 1; // info
 }
 
-function computeGrade(total: number): string {
-  const clamped = Math.round(Math.max(0, Math.min(100, total)));
-  for (const [threshold, grade] of GRADE_THRESHOLDS) {
-    if (clamped >= threshold) return grade;
-  }
-  return "F";
-}
-
 export interface ClientScoreResult {
   total: number;
-  grade: string;
   breakdown: Record<string, { earned: number; max: number }>;
 }
 
@@ -101,6 +88,5 @@ export function calculateClientScore(
     total += earned;
   }
 
-  const roundedTotal = Math.round(total * 100) / 100;
-  return { total: roundedTotal, grade: computeGrade(roundedTotal), breakdown };
+  return { total: Math.round(total), breakdown };
 }

@@ -1,6 +1,7 @@
 import type { TlsCertInfo, SslResult, CheckStatus } from "../types.js";
 import type { ChainCertInfo, ChainIssue, SctInfo, CtPolicyResult } from "./sslChecker.types.js";
 import { findLogByLogId } from "./knownCtLogs.js";
+import { detectManagedCert } from "./cdnIssuer.js";
 
 /**
  * Validate a certificate chain for completeness and correctness.
@@ -235,6 +236,31 @@ export function worstStatus(...statuses: CheckStatus[]): CheckStatus {
     if (STATUS_PRIORITY[s] > STATUS_PRIORITY[worst]) worst = s;
   }
   return worst;
+}
+
+/**
+ * Mark a cert as CDN-managed and soften the "expiring soon" warn → info,
+ * because the CDN auto-rotates and the domain owner has no action to take.
+ *
+ * Mutates `ssl` in place. Called after `analyzeSslDeep` once we know which
+ * CDN (if any) fronts the domain (from blacklist CIDR detection).
+ *
+ * The downgrade is *only* applied when expiry is the sole cause of the warn —
+ * if chain validation or CT policy independently failed, status stays warn/fail.
+ */
+export function applyManagedCertPolicy(ssl: SslResult, cdnProvider?: string | null): void {
+  const managedBy = detectManagedCert(ssl.issuer, cdnProvider);
+  if (!managedBy) return;
+  ssl.managedBy = managedBy;
+
+  const chainBad = ssl.chainStatus === "warn" || ssl.chainStatus === "fail";
+  const ctBad = ssl.ct?.chromeStatus === "fail" || ssl.ct?.appleStatus === "fail";
+  const expiringSoon =
+    ssl.daysRemaining !== null && ssl.daysRemaining > 0 && ssl.daysRemaining <= 30;
+
+  if (ssl.status === "warn" && expiringSoon && !chainBad && !ctBad) {
+    ssl.status = "info";
+  }
 }
 
 /**

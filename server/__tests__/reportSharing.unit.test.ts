@@ -14,9 +14,9 @@ describe("reportSharing", () => {
     ).run("user-1", "test@example.com", "github", "gh-123");
     // Insert a completed scan owned by user-1
     db.prepare(
-      `INSERT INTO scans (id, user_id, domain, scan_type, status, score, grade, result_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
-    ).run("scan-1", "user-1", "example.com", "single", "completed", 85, "A", '{"test":true}');
+      `INSERT INTO scans (id, user_id, domain, scan_type, status, score, result_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    ).run("scan-1", "user-1", "example.com", "single", "completed", 85, '{"test":true}');
   });
 
   afterEach(() => {

@@ -1,4 +1,7 @@
 import type { CheckStatus } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("upstream");
 
 export interface UrlhausResult {
   status: CheckStatus;
@@ -28,6 +31,7 @@ export async function checkUrlhaus(domain: string, timeout: number = 5000): Prom
     clearTimeout(timer);
 
     if (!res.ok) {
+      log.warn({ upstream: "urlhaus", status: res.status, domain }, "upstream returned non-2xx");
       return { status: "info", listed: false, urlCount: 0, error: `URLhaus returned HTTP ${res.status}` };
     }
 
@@ -43,7 +47,8 @@ export async function checkUrlhaus(domain: string, timeout: number = 5000): Prom
     }
 
     return { status: "pass", listed: false, urlCount: 0 };
-  } catch {
+  } catch (err: any) {
+    log.warn({ upstream: "urlhaus", domain, err: err?.name || err?.message || String(err) }, "upstream request failed");
     return { status: "info", listed: false, urlCount: 0, error: "URLhaus lookup failed" };
   }
 }

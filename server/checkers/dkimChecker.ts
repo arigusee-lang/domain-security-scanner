@@ -1,5 +1,9 @@
 import dns from "node:dns/promises";
 import type { DkimResult, DkimSelectorResult } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+import { safeResolve } from "../lib/dnsResolve.js";
+
+const log = createLogger("dkim");
 
 const SELECTORS: { selector: string; service: string }[] = [
   { selector: "google", service: "Google Workspace" },
@@ -18,24 +22,17 @@ const SELECTORS: { selector: string; service: string }[] = [
   { selector: "zendesk", service: "Zendesk" },
 ];
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), ms);
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
-    );
-  });
-}
-
 export async function checkDkim(domain: string, timeout: number = 5000): Promise<DkimResult> {
   const results = await Promise.allSettled(
     SELECTORS.map(async ({ selector, service }): Promise<DkimSelectorResult> => {
       try {
-        const records = await withTimeout(dns.resolveTxt(`${selector}._domainkey.${domain}`), timeout);
+        const records = await safeResolve(() => dns.resolveTxt(`${selector}._domainkey.${domain}`), timeout);
         const record = records.map(r => r.join("")).join("");
         return { selector, service, found: true, record };
-      } catch {
+      } catch (err: any) {
+        if (err?.message === "timeout") {
+          log.warn({ domain, selector }, "DNS lookup timed out");
+        }
         return { selector, service, found: false };
       }
     })

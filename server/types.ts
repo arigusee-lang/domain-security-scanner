@@ -55,6 +55,8 @@ export interface SafeFetchWithHeadersResponse {
   fallbackUsed: boolean;
   responseHeaders: Record<string, string>;
   tlsCert: TlsCertInfo | null;
+  chainCerts?: any[];
+  rawLeafCert?: Buffer;
 }
 
 // ── Headers ──
@@ -94,6 +96,7 @@ export interface SpfResult {
   mechanisms: SpfMechanism[];
   dnsLookupCount: number;
   error?: string;
+  notice?: string;
 }
 
 // ── DMARC ──
@@ -102,6 +105,10 @@ export interface DmarcTag {
   tag: string;
   value: string;
   description: string;
+  /** Per-tag status — set when the tag value is invalid or carries a warning. Absent = ok. */
+  status?: CheckStatus;
+  /** Short human-readable explanation when `status` is warn/fail. */
+  issue?: string;
 }
 
 export interface DmarcValidationItem {
@@ -111,12 +118,30 @@ export interface DmarcValidationItem {
   ref?: string;
 }
 
+export interface DmarcReportUri {
+  /** Original URI as it appears in the record, e.g. "mailto:dmarc@example.com". */
+  uri: string;
+  /** Email address (after `mailto:` and before optional `!size`). Null for non-mailto URIs. */
+  email: string | null;
+  /** Email address domain. Null if URI couldn't be parsed. */
+  domain: string | null;
+  /** True if the URI's domain differs from the DMARC record's domain (and is not a sub-suffix). */
+  external: boolean;
+  /** For external URIs only: did the destination publish `<from>._report._dmarc.<dst>` v=DMARC1? Null if internal or check failed. */
+  authorized: boolean | null;
+}
+
 export interface DmarcResult {
   status: CheckStatus;
   record: string | null;
   validations: DmarcValidationItem[];
   tags: DmarcTag[];
   error?: string;
+  notice?: string;
+  /** Parsed rua URIs with external-destination authorization status. */
+  ruaUris?: DmarcReportUri[];
+  /** Parsed ruf URIs with external-destination authorization status. */
+  rufUris?: DmarcReportUri[];
 }
 
 // ── DKIM ──
@@ -167,6 +192,10 @@ export interface MxRecord {
 export interface MxResult {
   status: CheckStatus;
   records: MxRecord[];
+  /** True if the domain accepts email — false if there are no MX records or a Null MX (RFC 7505). */
+  hasMail?: boolean;
+  /** RFC 7505 Null MX (single record `0 .`) — explicit "this domain does not accept mail". */
+  nullMx?: boolean;
 }
 
 // ── NS ──
@@ -180,6 +209,45 @@ export interface NsResult {
 // ── SSL ──
 
 import type { ChainCertInfo, ChainIssue, CtPolicyResult } from "./checkers/sslChecker.types.js";
+
+/**
+ * One observed certificate from a single edge IP. The same `domain` can be
+ * served from many IPs (CDN, anycast, multi-region LB) — each may carry a
+ * different certificate during rotation.
+ */
+export interface TlsEdgeSample {
+  ip: string;
+  /** SHA-256 fingerprint of the leaf cert (hex, no separators). Same fingerprint = identical cert. */
+  fingerprint: string;
+  issuer: string;
+  notAfter: string;        // ISO date
+  daysRemaining: number;
+  /** True if `domain` matches the cert's CN/SANs (hostname verification). */
+  sanMatch: boolean;
+  /** True if the chain verified up to a trusted root (libssl default trust store). */
+  chainOk: boolean;
+  /** Set when the per-IP TLS handshake failed; other fields are placeholder values. */
+  error?: string;
+}
+
+export type TlsEdgesConsistency =
+  | "consistent"      // 1 unique fingerprint, all samples OK
+  | "rollout"         // 2+ fingerprints but all valid — normal mid-rotation state
+  | "inconsistent"    // a sample failed sanMatch / chainOk → real problem on some edge
+  | "unknown";        // < 2 samples returned, no comparison possible
+
+export interface TlsEdgesResult {
+  samples: TlsEdgeSample[];
+  /** IPs we tried but couldn't get a sample from (timeout, refused, etc.). */
+  failedIps: string[];
+  /** Count of distinct leaf-cert fingerprints across successful samples. */
+  distinctFingerprints: number;
+  minDaysRemaining: number | null;
+  maxDaysRemaining: number | null;
+  allSanMatch: boolean;
+  allChainOk: boolean;
+  consistency: TlsEdgesConsistency;
+}
 
 export interface SslResult {
   status: CheckStatus;
@@ -196,6 +264,15 @@ export interface SslResult {
   chainStatus?: CheckStatus;
   chainIssues?: ChainIssue[];
   ct?: CtPolicyResult;
+  /** Multi-IP edge probe — set when we sampled cert from each resolved IP separately. */
+  edges?: TlsEdgesResult;
+  /**
+   * Name of the CDN/cloud provider that auto-rotates this cert (Cloudflare,
+   * AWS ACM, Google Cloud, Fastly, Azure). Null when the cert is managed by
+   * the domain owner directly (Let's Encrypt on origin, custom uploaded, etc.)
+   * — those still need the standard expiry warnings.
+   */
+  managedBy?: string | null;
 }
 
 // ── Domain Expiry ──
@@ -207,7 +284,34 @@ export interface DomainExpiryResult {
   error?: string;
 }
 
-// ── Blacklist ──
+// ── Infrastructure ──
+
+/**
+ * What we observe about a domain's hosting / edge network. Distinct from
+ * `BlacklistResult` (which is DNSBL only): infrastructure is the resolve+CDN
+ * detection layer that other checks consume (multi-edge TLS probe, CDN-managed
+ * cert detect, DNSBL ip-target).
+ */
+export interface InfrastructureResult {
+  /** Primary IP — first IP from the multi-resolver probe. Null when resolve failed. */
+  ip: string | null;
+  /**
+   * All unique A-record IPs observed across multiple public resolvers
+   * (Google, Cloudflare, Quad9, OpenDNS). Larger sets indicate anycast / CDN
+   * edges; a single IP typically means a single origin host.
+   */
+  ips: string[];
+  /** Number of public resolvers that returned at least one IP. */
+  resolverCount: number;
+  /** CDN/cloud name matched against the primary IP's CIDR (or null). */
+  cdnProvider: string | null;
+  /** CDN providers detected across all observed IPs (usually 0 or 1). */
+  cdnProviders: string[];
+  /** Set when resolve failed for all paths (public resolvers + system fallback). */
+  error?: string;
+}
+
+// ── Blacklist (DNSBL only after the Phase A refactor) ──
 
 export interface DnsblProviderResult {
   provider: string;
@@ -218,8 +322,6 @@ export interface DnsblProviderResult {
 
 export interface BlacklistResult {
   status: CheckStatus;
-  ip: string | null;
-  cdnProvider?: string;
   providers: DnsblProviderResult[];
   error?: string;
 }
@@ -257,6 +359,8 @@ export interface DomainCheckResponse {
   ns: NsResult;
   ssl: SslResult;
   domainExpiry: DomainExpiryResult;
+  /** Optional — only populated when blacklist or ssl checks ran. */
+  infrastructure?: InfrastructureResult;
   blacklist: BlacklistResult;
   ctLogs: CtLogsResult;
   redirects: RedirectResult;
@@ -283,7 +387,7 @@ export interface CtFinding {
   subdomain?: string;
 }
 
-export type CtDataSource = "crt.sh" | "certspotter" | "cache" | "none";
+export type CtDataSource = "crt.sh" | "certspotter" | "none";
 
 export interface CtLogsResult {
   status: CheckStatus;
@@ -294,6 +398,11 @@ export interface CtLogsResult {
   source: CtDataSource;
   fromCache?: boolean;
   cachedAt?: string;
+  // True when both upstream sources failed and we returned a cached entry that
+  // had passed its freshness window. `staleSeconds` is the age of that entry.
+  stale?: boolean;
+  staleSeconds?: number;
+  lastCertSpotterId?: string;
   error?: string;
 }
 
@@ -303,6 +412,7 @@ export interface CtCheckOptions {
   caaRecords?: CaaRecord[];
   crtShFirst?: boolean;
   timeout?: number;
+  startAfterId?: string;
 }
 
 // ── Redirect / HTTPS ──
@@ -384,18 +494,20 @@ export interface UserRow {
   avatar_url: string | null;
   provider: "google" | "github";
   provider_id: string;
-  plan: "registered" | "pro" | "enterprise";
+  plan: "free" | "premium" | "premium_plus";
+  role: "user" | "admin";
   created_at: string;
+  last_login_at: string | null;
 }
 
 export interface ScanRow {
   id: string;
   user_id: string | null;
+  batch_id: string | null;
   domain: string;
   scan_type: "single" | "batch";
   status: "pending" | "running" | "completed" | "failed";
   score: number | null;
-  grade: string | null;
   config_json: string | null;
   result_json: string | null;
   changes_json: string | null;
@@ -424,19 +536,6 @@ export interface BatchScanDomainRow {
   domain: string;
   scan_id: string | null;
   status: "pending" | "running" | "completed" | "failed";
-}
-
-export interface ScheduledScanRow {
-  id: string;
-  user_id: string;
-  name: string | null;
-  domains_json: string;
-  cron: string;
-  config_json: string | null;
-  enabled: number;
-  last_run_at: string | null;
-  next_run_at: string | null;
-  created_at: string;
 }
 
 export interface WebhookRow {
@@ -469,13 +568,21 @@ export interface NotificationLogRow {
   id: string;
   user_id: string;
   scan_id: string | null;
-  scheduled_id: string | null;
   type: "email" | "webhook";
   status: "pending" | "sent" | "failed";
   payload_json: string | null;
   error: string | null;
   created_at: string;
   sent_at: string | null;
+}
+
+export interface PlanAuditLogRow {
+  id: string;
+  admin_id: string;
+  user_id: string;
+  old_plan: string;
+  new_plan: string;
+  changed_at: string;
 }
 
 // ── Score ──
@@ -486,7 +593,6 @@ export interface ScoreBreakdown {
 
 export interface ScoreResponse {
   total: number;
-  grade: string;
   breakdown: ScoreBreakdown;
 }
 
@@ -532,7 +638,7 @@ export const DEFAULT_SCAN_CONFIG: ScanConfig = {
     securityTxt: true, headers: true, spf: true, dmarc: true,
     dkim: true, dnssec: true, caa: true, mx: true, ns: true,
     ssl: true, domainExpiry: true, blacklist: true, ctLogs: true,
-    redirects: true, seo: true, reputation: true, danglingDns: true,
+    redirects: true, seo: false, reputation: true, danglingDns: true,
   },
   noCache: false,
 };
@@ -554,7 +660,6 @@ export interface DiffResult {
   previousScanId: string | null;
   previousScanDate: string | null;
   scoreDelta: number;
-  gradeChange: { from: string; to: string } | null;
   changes: DiffChange[];
   summary: {
     newIssues: number;

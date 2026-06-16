@@ -29,7 +29,7 @@ export function checkExpiresField(lines: ParsedLine[]): Finding[] {
       line.kind === 'field' && line.name.toLowerCase() === 'expires'
   );
 
-  // Skip if 0 or 2+ Expires fields — those cases are handled by requiredFields
+  // Skip if 0 or 2+ Expires fields ï¿½ those cases are handled by requiredFields
   if (expiresFields.length !== 1) {
     return findings;
   }
@@ -76,7 +76,7 @@ export function checkExpiresField(lines: ParsedLine[]): Finding[] {
   // Past
   if (diffMs < 0) {
     findings.push({
-      severity: 'error',
+      severity: 'warning',
       lineNumber: field.lineNumber,
       title: 'Expired security.txt',
       explanation: 'The file has expired.',

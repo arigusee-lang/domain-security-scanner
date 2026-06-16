@@ -3,6 +3,8 @@
  * Mirrors the logic in server/routes/domainCheck.ts but returns a DomainCheckResponse
  * directly instead of sending HTTP responses.
  */
+import { performance } from "node:perf_hooks";
+import { createLogger } from "./lib/logger.js";
 import { safeFetchWithHeaders } from "./lib/safeFetch.js";
 import { ssrfSafeFetch, ssrfSafeTlsConnect } from "./lib/ipCheck.js";
 import { cacheGet, cacheSet } from "./lib/cache.js";
@@ -14,10 +16,12 @@ import { checkDnssec } from "./checkers/dnssecChecker.js";
 import { checkCaa } from "./checkers/caaChecker.js";
 import { checkMx } from "./checkers/mxChecker.js";
 import { checkNs } from "./checkers/nsChecker.js";
-import { analyzeSsl, analyzeSslDeep } from "./checkers/sslChecker.js";
+import { analyzeSsl, analyzeSslDeep, applyManagedCertPolicy } from "./checkers/sslChecker.js";
 import type { ChainCertInfo } from "./checkers/sslChecker.types.js";
+import { probeMultiEdge } from "./lib/tlsEdgeProbe.js";
 import { checkDomainExpiry } from "./checkers/domainExpiryChecker.js";
 import { checkBlacklist } from "./checkers/blacklistChecker.js";
+import { checkInfrastructure } from "./checkers/infrastructureChecker.js";
 import { checkCtLogs } from "./checkers/ctLogsChecker.js";
 import { checkRedirects } from "./checkers/redirectChecker.js";
 import { checkSeo } from "./checkers/seoChecker.js";
@@ -30,21 +34,31 @@ import type { DomainCheckResponse, ScanConfig, CtCheckOptions, SslResult } from 
 
 const DNS_TIMEOUT = 8000;
 const HTTP_TIMEOUT = 15000;
-const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_TTL = 15 * 60 * 1000;
+
+const log = createLogger("scan");
 
 /** Helper: run a checker with caching */
 async function cached<T>(key: string, noCache: boolean, fn: () => Promise<T>): Promise<T> {
   if (!noCache) {
-    const hit = cacheGet<T>(key);
+    const hit = await cacheGet<T>(key);
     if (hit) return hit;
   }
   const result = await fn();
-  cacheSet(key, result, CACHE_TTL);
+  await cacheSet(key, result, CACHE_TTL);
   return result;
 }
 
 function settled<T>(s: PromiseSettledResult<T>, fallback: T): T {
   return s.status === "fulfilled" ? s.value : fallback;
+}
+
+/** Record per-checker durations into a shared map so the scan-summary log can include them. */
+function timed<T>(timings: Record<string, number>, name: string, fn: () => Promise<T>): Promise<T> {
+  const start = performance.now();
+  return fn().finally(() => {
+    timings[name] = Math.round(performance.now() - start);
+  });
 }
 
 /**
@@ -57,18 +71,29 @@ export async function runDomainCheck(
 ): Promise<DomainCheckResponse> {
   const nc = config.noCache;
   const checks = config.checks;
+  const scanStart = performance.now();
+  const timings: Record<string, number> = {};
+
+  // --- Infrastructure: resolve + CDN detect (runs first — blacklist DNSBL,
+  //     multi-edge TLS probe, and CDN-managed cert detect all depend on it) ---
+  const infrastructure = checks.blacklist || checks.ssl
+    ? await timed(timings, "infrastructure", () =>
+        cached(`infra:${domain}`, nc, () => checkInfrastructure(domain, DNS_TIMEOUT)),
+      )
+    : null;
+  const infraIp = infrastructure?.ip ?? null;
 
   // --- DNS checks (parallel) ---
   const dnsPromises = await Promise.allSettled([
-    checks.spf ? cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.dmarc ? cached(`dmarc:${domain}`, nc, () => checkDmarc(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.dkim ? cached(`dkim:${domain}`, nc, () => checkDkim(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.dnssec ? cached(`dnssec:${domain}`, nc, () => checkDnssec(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.caa ? cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.mx ? cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.ns ? cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.blacklist ? cached(`bl:${domain}`, nc, () => checkBlacklist(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.danglingDns ? cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT)) : Promise.resolve(null),
+    checks.spf ? timed(timings, "spf", () => cached(`spf:${domain}`, nc, () => checkSpf(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.dmarc ? timed(timings, "dmarc", () => cached(`dmarc:${domain}`, nc, () => checkDmarc(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.dkim ? timed(timings, "dkim", () => cached(`dkim:${domain}`, nc, () => checkDkim(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.dnssec ? timed(timings, "dnssec", () => cached(`dnssec:${domain}`, nc, () => checkDnssec(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.caa ? timed(timings, "caa", () => cached(`caa:${domain}`, nc, () => checkCaa(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.mx ? timed(timings, "mx", () => cached(`mx:${domain}`, nc, () => checkMx(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.ns ? timed(timings, "ns", () => cached(`ns:${domain}`, nc, () => checkNs(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.blacklist ? timed(timings, "blacklist", () => cached(`bl:${domain}`, nc, () => checkBlacklist(domain, infraIp, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.danglingDns ? timed(timings, "danglingDns", () => cached(`dng:${domain}`, nc, () => checkDanglingDns(domain, DNS_TIMEOUT))) : Promise.resolve(null),
   ]);
 
   const [spfR, dmarcR, dkimR, dnssecR, caaR, mxR, nsR, blacklistR, danglingDnsR] = dnsPromises;
@@ -80,16 +105,16 @@ export async function runDomainCheck(
   const caa = settled(caaR, null) ?? { status: "fail" as const, records: [], error: "Check failed" };
   const mx = settled(mxR, null) ?? { status: "info" as const, records: [] };
   const ns = settled(nsR, null) ?? { status: "fail" as const, nameservers: [], error: "Check failed" };
-  const blacklist = settled(blacklistR, null) ?? { status: "info" as const, ip: null, providers: [], error: "Check failed" };
+  const blacklist = settled(blacklistR, null) ?? { status: "info" as const, providers: [], error: "Check failed" };
   const danglingDns = settled(danglingDnsR, null) ?? { status: "info" as const, records: [], danglingCount: 0, error: "Check failed" };
 
   // --- Web checks (parallel) ---
   const webPromises = await Promise.allSettled([
     checks.securityTxt
-      ? cached(`fetch:${domain}`, nc, () => safeFetchWithHeaders(domain, HTTP_TIMEOUT))
+      ? timed(timings, "securityTxt", () => cached(`fetch:${domain}`, nc, () => safeFetchWithHeaders(domain, HTTP_TIMEOUT)))
       : Promise.resolve(null),
     checks.headers
-      ? cached(`hdrs:${domain}`, nc, async () => {
+      ? timed(timings, "headers", () => cached(`hdrs:${domain}`, nc, async () => {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT);
           try {
@@ -107,10 +132,10 @@ export async function runDomainCheck(
             clearTimeout(timer);
             return null;
           }
-        })
+        }))
       : Promise.resolve(null),
     checks.ssl
-      ? cached(`tls:${domain}`, nc, async () => {
+      ? timed(timings, "ssl", () => cached(`tls:${domain}`, nc, async () => {
           return new Promise<any>(async (resolve) => {
             try {
               const socket = await ssrfSafeTlsConnect(
@@ -186,11 +211,14 @@ export async function runDomainCheck(
               });
             } catch { resolve(null); }
           });
-        })
+        }))
+      : Promise.resolve(null),
+    checks.ssl && (infrastructure?.ips.length ?? 0) > 0
+      ? timed(timings, "edges", () => cached(`edges:${domain}`, nc, () => probeMultiEdge(domain, infrastructure!.ips, HTTP_TIMEOUT)))
       : Promise.resolve(null),
   ]);
 
-  const [fetchResultR, headersResultR, tlsCertR] = webPromises;
+  const [fetchResultR, headersResultR, tlsCertR, edgesR] = webPromises;
 
   // Build security.txt section
   let securityTxt: DomainCheckResponse["securityTxt"];
@@ -236,23 +264,31 @@ export async function runDomainCheck(
   } else {
     ssl = analyzeSsl(null);
   }
+  const edgesResult = settled(edgesR, null) as SslResult["edges"] | null;
+  if (edgesResult) {
+    ssl.edges = edgesResult;
+  }
+  applyManagedCertPolicy(ssl, infrastructure?.cdnProvider);
 
   // --- Additional checks (parallel) ---
   // Build CtCheckOptions from SSL and CAA results (available from earlier waves)
+  // Subdomain CT is a premium-tier feature; cache key must reflect the mode
+  // so anonymous and premium-cached results don't poison each other.
+  const wantSubdomains = !!config.authenticated;
   const ctOpts: CtCheckOptions = {
-    authenticated: !!config.authenticated,
+    authenticated: wantSubdomains,
     sslIssuer: ssl?.issuer ?? null,
     caaRecords: caa?.records ?? [],
     crtShFirst: config.crtShFirst ?? false,
   };
 
   const extraPromises = await Promise.allSettled([
-    checks.domainExpiry ? cached(`exp:${domain}`, nc, () => checkDomainExpiry(domain, HTTP_TIMEOUT)) : Promise.resolve(null),
-    checks.ctLogs ? cached(`ct:${domain}`, nc, () => checkCtLogs(domain, ctOpts)) : Promise.resolve(null),
-    checks.redirects ? cached(`redir:${domain}`, nc, () => checkRedirects(domain, HTTP_TIMEOUT)) : Promise.resolve(null),
-    checks.seo ? cached(`seo:${domain}`, nc, () => checkSeo(domain, HTTP_TIMEOUT)) : Promise.resolve(null),
-    checks.reputation ? cached(`sb:${domain}`, nc, () => checkSafeBrowsing(domain, DNS_TIMEOUT)) : Promise.resolve(null),
-    checks.reputation ? cached(`uh:${domain}`, nc, () => checkUrlhaus(domain, DNS_TIMEOUT)) : Promise.resolve(null),
+    checks.domainExpiry ? timed(timings, "domainExpiry", () => cached(`exp:${domain}`, nc, () => checkDomainExpiry(domain, HTTP_TIMEOUT))) : Promise.resolve(null),
+    checks.ctLogs ? timed(timings, "ctLogs", () => cached(`ct:${domain}:${wantSubdomains ? "s1" : "s0"}`, nc, () => checkCtLogs(domain, ctOpts))) : Promise.resolve(null),
+    checks.redirects ? timed(timings, "redirects", () => cached(`redir:${domain}`, nc, () => checkRedirects(domain, HTTP_TIMEOUT))) : Promise.resolve(null),
+    checks.seo ? timed(timings, "seo", () => cached(`seo:${domain}`, nc, () => checkSeo(domain, HTTP_TIMEOUT))) : Promise.resolve(null),
+    checks.reputation ? timed(timings, "safeBrowsing", () => cached(`sb:${domain}`, nc, () => checkSafeBrowsing(domain, DNS_TIMEOUT))) : Promise.resolve(null),
+    checks.reputation ? timed(timings, "urlhaus", () => cached(`uh:${domain}`, nc, () => checkUrlhaus(domain, DNS_TIMEOUT))) : Promise.resolve(null),
   ]);
 
   const [domainExpiryR, ctLogsR, redirectsR, seoR, safeBrowsingR, urlhausR] = extraPromises;
@@ -263,6 +299,31 @@ export async function runDomainCheck(
   const seo = settled(seoR, null) ?? { status: "info" as const, items: [], error: "Check failed" };
   const safeBrowsing = settled(safeBrowsingR, null) ?? { status: "info" as const, safe: null, threats: [], error: "Check failed" };
   const urlhaus = settled(urlhausR, null) ?? { status: "info" as const, listed: false, urlCount: 0, error: "Check failed" };
+
+  const checkerResults: Record<string, { status?: string }> = {
+    spf, dmarc, dkim, dnssec, caa, mx, ns, blacklist, danglingDns,
+    securityTxt, headers, ssl,
+    domainExpiry, ctLogs, redirects, seo, safeBrowsing, urlhaus,
+  };
+  const summary = { pass: 0, warn: 0, fail: 0, info: 0 };
+  const checkers: Record<string, { status: string; durationMs: number | null }> = {};
+  for (const [name, r] of Object.entries(checkerResults)) {
+    const status = r?.status ?? "info";
+    if (status in summary) summary[status as keyof typeof summary]++;
+    checkers[name] = { status, durationMs: timings[name] ?? null };
+  }
+
+  log.info(
+    {
+      domain,
+      durationMs: Math.round(performance.now() - scanStart),
+      authenticated: !!config.authenticated,
+      noCache: nc,
+      summary,
+      checkers,
+    },
+    "scan completed",
+  );
 
   return {
     domain,
@@ -278,6 +339,7 @@ export async function runDomainCheck(
     ns,
     ssl,
     domainExpiry,
+    infrastructure: infrastructure ?? undefined,
     blacklist,
     ctLogs,
     redirects,

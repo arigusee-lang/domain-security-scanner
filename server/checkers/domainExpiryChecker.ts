@@ -1,9 +1,10 @@
+import { getDomain } from "tldts";
 import type { DomainExpiryResult } from "../types.js";
 
 export async function checkDomainExpiry(domain: string, timeout: number = 8000): Promise<DomainExpiryResult> {
-  // Extract the registrable domain (last two parts) for RDAP lookup
-  const parts = domain.split(".");
-  const rdapDomain = parts.length > 2 ? parts.slice(-2).join(".") : domain;
+  // Resolve the registrable domain via the Public Suffix List so multi-level
+  // ccTLDs like .com.ua / .co.uk are not truncated to their public suffix.
+  const rdapDomain = getDomain(domain) ?? domain;
 
   // Try multiple RDAP bootstrap sources for resilience
   const rdapUrls = [

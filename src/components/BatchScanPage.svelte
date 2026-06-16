@@ -17,7 +17,7 @@
   let results: Array<{
     domain: string;
     status: string;
-    grade: string | null;
+    scan?: { score: number | null } | null;
   }> = [];
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -67,7 +67,7 @@
           status: string;
           total_domains: number;
           completed_domains: number;
-          domains: Array<{ domain: string; status: string; grade: string | null }>;
+          domains: Array<{ domain: string; status: string; scan?: { score: number | null } | null }>;
         }>(`/api/batch/${batchId}`);
 
         completedDomains = res.completed_domains;
@@ -143,7 +143,7 @@
             <tr>
               <th>Domain</th>
               <th>Status</th>
-              <th>Grade</th>
+              <th>Score</th>
             </tr>
           </thead>
           <tbody>
@@ -153,7 +153,7 @@
                 <td>
                   <span class="status-badge {row.status}">{row.status}</span>
                 </td>
-                <td class="grade-cell">{row.grade || '—'}</td>
+                <td class="score-cell">{row.scan?.score != null ? Math.round(row.scan.score) : '—'}</td>
               </tr>
             {/each}
           </tbody>
@@ -333,7 +333,7 @@
     font-size: 0.75rem;
   }
 
-  .grade-cell { font-weight: 600; }
+  .score-cell { font-weight: 600; font-family: var(--font-mono); }
 
   .status-badge {
     font-size: 0.65rem;

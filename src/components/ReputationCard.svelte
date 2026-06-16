@@ -1,17 +1,21 @@
 <script lang="ts">
-  import type { SafeBrowsingResult, UrlhausResult, BlacklistResult, CheckStatus } from '../lib/types';
+  import type { SafeBrowsingResult, UrlhausResult, BlacklistResult, InfrastructureResult, CheckStatus } from '../lib/types';
   import ResultCard from './ResultCard.svelte';
   import CheckStatusIcon from './CheckStatusIcon.svelte';
 
   export let safeBrowsing: SafeBrowsingResult;
   export let urlhaus: UrlhausResult;
   export let blacklist: BlacklistResult;
+  export let infrastructure: InfrastructureResult | null | undefined = null;
 
   function worst(...statuses: CheckStatus[]): CheckStatus {
     const order: Record<CheckStatus, number> = { fail: 0, warn: 1, info: 2, pass: 3 };
     return statuses.reduce((a, b) => order[a] <= order[b] ? a : b);
   }
 
+  // Legacy fallback: pre-Phase-A scans kept ip/cdnProvider on blacklist.
+  $: hasIp = !!(infrastructure?.ip ?? (blacklist as any)?.ip);
+  $: cdnProvider = infrastructure?.cdnProvider ?? (blacklist as any)?.cdnProvider ?? null;
   $: domainProviders = blacklist.providers.filter(p => p.type === 'domain');
   $: ipProviders = blacklist.providers.filter(p => p.type === 'ip');
   $: overall = worst(safeBrowsing.status, urlhaus.status, blacklist.status);
@@ -68,15 +72,7 @@
     <h4 class="sub-title"><CheckStatusIcon status={blacklist.status} /> <a class="ref-link" href="https://www.dnsbl.info/" target="_blank" rel="noopener">Blacklists (DNSBL)</a></h4>
     {#if blacklist.error}
       <p class="note">{blacklist.error}</p>
-    {:else if blacklist.ip}
-      <p class="bl-ip">IP: <code>{blacklist.ip}</code></p>
-
-      {#if blacklist.cdnProvider}
-        <div class="cdn-badge" title="IP {blacklist.ip} belongs to {blacklist.cdnProvider}. IP-based blacklist results may not reflect this specific domain.">
-          <span class="cdn-icon">ⓘ</span> Cloud/CDN detected: {blacklist.cdnProvider} — IP-based results may be inaccurate
-        </div>
-      {/if}
-
+    {:else if hasIp}
       {#if domainProviders.length > 0}
         <p class="bl-section-label">Domain-based</p>
         <div class="bl-list">
@@ -94,8 +90,11 @@
         </div>
       {/if}
 
-      {#if ipProviders.length > 0}
-        <p class="bl-section-label">IP-based{blacklist.cdnProvider ? ' (CDN IP)' : ''}</p>
+      {#if cdnProvider}
+        <p class="bl-section-label">IP-based</p>
+        <p class="note">Not applicable — {cdnProvider} edge IPs are shared across many domains, so per-IP DNSBL results don't reflect this domain specifically.</p>
+      {:else if ipProviders.length > 0}
+        <p class="bl-section-label">IP-based</p>
         <div class="bl-list">
           {#each ipProviders as p}
             <div class="bl-row">
@@ -132,21 +131,12 @@
     font-size: 0.7rem; background: rgba(255, 77, 106, 0.12); color: var(--color-error);
     border: 1px solid rgba(255, 77, 106, 0.25);
   }
-  .bl-ip { font-size: 0.8rem; color: var(--color-text-secondary); margin-bottom: 0.3rem; }
-  .bl-ip code { background: var(--color-bg); padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.75rem; }
   .bl-list { display: flex; flex-direction: column; gap: 0.2rem; }
   .bl-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--color-text-secondary); }
   .bl-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-valid); flex-shrink: 0; }
   .bl-dot.listed { background: var(--color-error); }
   .bl-status { margin-left: auto; font-size: 0.7rem; }
   .bl-section-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-text-secondary); margin: 0.5rem 0 0.2rem; }
-  .cdn-badge {
-    display: flex; align-items: center; gap: 0.3rem;
-    font-size: 0.72rem; color: var(--color-warning);
-    background: rgba(230, 167, 0, 0.08); border: 1px solid rgba(230, 167, 0, 0.2);
-    border-radius: var(--radius); padding: 0.3rem 0.5rem; margin: 0.3rem 0; cursor: help;
-  }
-  .cdn-icon { font-size: 0.8rem; opacity: 0.8; }
   .ref-link { color: inherit; text-decoration: none; }
   .ref-link:hover { text-decoration: underline; color: var(--color-accent); }
 </style>

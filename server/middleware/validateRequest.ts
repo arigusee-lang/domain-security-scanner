@@ -5,6 +5,13 @@ import type { Request, Response, NextFunction } from "express";
  * Rejects missing, empty, or malformed domain values.
  */
 export function validateRequest(req: Request, res: Response, next: NextFunction): void {
+  // POST endpoints under /api/domain-check (e.g. /finalize, /save) carry their
+  // payload in the body, not the query â€” they validate their own inputs.
+  if (req.method !== "GET") {
+    next();
+    return;
+  }
+
   const domain = req.query.domain;
 
   if (!domain || typeof domain !== "string") {
@@ -27,7 +34,7 @@ export function validateRequest(req: Request, res: Response, next: NextFunction)
     return;
   }
 
-  // Allow domain names and IPs only — no schemes, paths, spaces, or control chars
+  // Allow domain names and IPs only ï¿½ no schemes, paths, spaces, or control chars
   // Valid: example.com, sub.example.com, 1.2.3.4
   const domainPattern = /^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$/;
   if (!domainPattern.test(trimmed) || trimmed.length > 253) {

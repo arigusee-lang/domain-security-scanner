@@ -32,6 +32,9 @@ const BUILTIN_LOGS: KnownCtLog[] = [
 ];
 
 import { createHash } from "node:crypto";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("ct-logs");
 
 let LOG_MAP = new Map<string, KnownCtLog>(BUILTIN_LOGS.map((l) => [l.logId, l]));
 
@@ -67,9 +70,9 @@ async function loadGoogleLogList(): Promise<void> {
       }
     }
     LOG_MAP = newMap;
-    console.log(`[ct-logs] Loaded ${newMap.size} CT logs from Google (was ${BUILTIN_LOGS.length} built-in)`);
+    log.info({ loaded: newMap.size, builtin: BUILTIN_LOGS.length }, "CT logs loaded from Google");
   } catch (e: any) {
-    console.warn(`[ct-logs] Failed to load Google log list: ${e?.message || e}. Using ${BUILTIN_LOGS.length} built-in logs.`);
+    log.warn({ err: e?.message || e, builtin: BUILTIN_LOGS.length }, "failed to load Google log list, using built-in");
   }
 }
 

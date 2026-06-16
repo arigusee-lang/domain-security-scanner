@@ -13,6 +13,16 @@
   import type { ValidationResult, ParsedLine, Finding, FetchMetadata, PgpInfo } from '../lib/types';
   import type { FetchProxyError } from '../lib/fetchProxy';
 
+  function parseDomainFromHash(): string {
+    const hash = window.location.hash;
+    const queryStart = hash.indexOf('?');
+    if (queryStart === -1) return '';
+    const params = new URLSearchParams(hash.substring(queryStart + 1));
+    return params.get('domain') || '';
+  }
+
+  const initialUrl = parseDomainFromHash();
+
   let validationResult: ValidationResult | null = null;
   let correctedText = '';
   let rawContent = '';
@@ -26,6 +36,14 @@
     document.title = 'security.txt Validator — Validate, Generate & Fix per RFC 9116';
     const meta = document.querySelector('meta[name="description"]');
     if (meta) meta.setAttribute('content', 'Free online tool to validate, generate, and auto-correct security.txt files per RFC 9116.');
+
+    window.scrollTo({ top: 0 });
+
+    if (initialUrl) {
+      handleValidate(new CustomEvent('validate', {
+        detail: { mode: 'url', content: '', domain: initialUrl },
+      }) as CustomEvent<{ mode: 'paste' | 'url' | 'generate'; content: string; domain: string }>);
+    }
   });
 
   function runValidation(content: string, fetchMeta?: FetchMetadata) {
@@ -95,7 +113,7 @@
     <p class="subtitle">Validate and fix your security.txt file against RFC 9116</p>
   </div>
 
-  <InputPanel on:validate={handleValidate} />
+  <InputPanel {initialUrl} on:validate={handleValidate} />
 
   {#if loading}
     <LoadingSpinner />

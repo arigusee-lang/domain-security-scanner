@@ -1,8 +1,12 @@
 import crypto from "node:crypto";
 import type Database from "better-sqlite3";
-import type { ScanConfig } from "./types.js";
+import type { DomainCheckResponse, ScanConfig } from "./types.js";
 import { calculateScore } from "./scoreCalculator.js";
 import { runDomainCheck } from "./domainPipeline.js";
+import { computeDiff } from "./diffEngine.js";
+import { createLogger } from "./lib/logger.js";
+
+const log = createLogger("batch");
 
 export interface BatchScanOptions {
   batchId: string;
@@ -20,10 +24,11 @@ export interface BatchScanOptions {
  * 1. Updates batch_scan_domains status → running
  * 2. Runs the full checker pipeline (same as /api/domain-check)
  * 3. Calculates score
- * 4. Saves result to scans table
- * 5. Updates batch_scan_domains status → completed (or failed)
- * 6. Increments batch_scans.completed_domains
- * 7. Waits 12–20s before next domain
+ * 4. Computes diff against the previous batch-scan of the same domain
+ * 5. Saves result + diff to scans table
+ * 6. Updates batch_scan_domains status → completed (or failed)
+ * 7. Increments batch_scans.completed_domains
+ * 8. Waits 12–20s before next domain
  *
  * When all domains are processed, sets batch status → completed.
  */
@@ -61,41 +66,64 @@ export async function runBatchScan(
       // 3. Calculate score
       const score = calculateScore(result);
 
-      // 4. Save to scans table
+      // 4. Compute diff against the previous batch-scan for this domain (batch ↔ batch only).
+      // Single-scan history is intentionally excluded; monitoring uses a separate table.
+      let diff = null;
+      try {
+        const previousBatchScan = db
+          .prepare(
+            `SELECT id, result_json, created_at FROM scans
+             WHERE user_id = ? AND domain = ? AND scan_type = 'batch' AND status = 'completed' AND result_json IS NOT NULL
+             ORDER BY created_at DESC LIMIT 1`,
+          )
+          .get(userId, domain) as { id: string; result_json: string; created_at: string } | undefined;
+
+        if (previousBatchScan) {
+          const previousResult = JSON.parse(previousBatchScan.result_json) as DomainCheckResponse;
+          diff = computeDiff(result as unknown as DomainCheckResponse, previousResult);
+          diff.previousScanId = previousBatchScan.id;
+          diff.previousScanDate = previousBatchScan.created_at;
+        }
+      } catch (err) {
+        log.error({ err, domain }, "diff computation failed");
+      }
+
+      // 5. Save to scans table
       scanId = crypto.randomUUID();
       const now = new Date().toISOString();
 
       db.prepare(
-        `INSERT INTO scans (id, user_id, domain, scan_type, status, score, grade, config_json, result_json, created_at, completed_at)
-         VALUES (?, ?, ?, 'batch', 'completed', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO scans (id, user_id, batch_id, domain, scan_type, status, score, config_json, result_json, changes_json, created_at, completed_at)
+         VALUES (?, ?, ?, ?, 'batch', 'completed', ?, ?, ?, ?, ?, ?)`,
       ).run(
         scanId,
         userId,
+        batchId,
         domain,
         score.total,
-        score.grade,
         JSON.stringify(config),
         JSON.stringify(result),
+        diff ? JSON.stringify(diff) : null,
         now,
         now,
       );
 
-      // 5. Update batch_scan_domains → completed with scan_id
+      // 6. Update batch_scan_domains → completed with scan_id
       db.prepare(
         "UPDATE batch_scan_domains SET status = 'completed', scan_id = ? WHERE id = ?",
       ).run(scanId, batchDomainId);
     } catch (err) {
       // Mark domain as failed, continue scanning remaining
       db.prepare("UPDATE batch_scan_domains SET status = 'failed' WHERE id = ?").run(batchDomainId);
-      console.error(`[batch] Domain "${domain}" failed:`, err);
+      log.error({ err, domain }, "domain failed");
     }
 
-    // 6. Increment completed_domains
+    // 7. Increment completed_domains
     db.prepare(
       "UPDATE batch_scans SET completed_domains = completed_domains + 1 WHERE id = ?",
     ).run(batchId);
 
-    // 7. Delay between domains (skip after last domain)
+    // 8. Delay between domains (skip after last domain)
     if (i < domains.length - 1 && delayMs > 0) {
       await delay(delayMs);
     }

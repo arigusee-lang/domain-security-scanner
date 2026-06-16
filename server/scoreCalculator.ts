@@ -28,16 +28,6 @@ export const WEIGHTS: Record<string, number> = {
   ns: 1,
 };
 
-/** Grade thresholds — ordered from highest to lowest. */
-export const GRADE_THRESHOLDS: [number, string][] = [
-  [95, "A+"],
-  [85, "A"],
-  [70, "B"],
-  [55, "C"],
-  [35, "D"],
-  [0, "F"],
-];
-
 /** Maps a CheckStatus to a numeric score: pass=1, warn=0.5, fail=0. info treated as pass (neutral). */
 export function statusToPoints(status: CheckStatus): number {
   if (status === "pass") return 1;
@@ -45,15 +35,6 @@ export function statusToPoints(status: CheckStatus): number {
   if (status === "fail") return 0;
   // "info" — category is informational / not applicable, treat as full points
   return 1;
-}
-
-/** Maps a numeric score (0–100) to a letter grade. */
-export function computeGrade(total: number): string {
-  const clamped = Math.round(Math.max(0, Math.min(100, total)));
-  for (const [threshold, grade] of GRADE_THRESHOLDS) {
-    if (clamped >= threshold) return grade;
-  }
-  return "F";
 }
 
 /**
@@ -126,8 +107,5 @@ export function calculateScore(
     total += earned;
   }
 
-  const roundedTotal = Math.round(total * 100) / 100;
-  const grade = computeGrade(roundedTotal);
-
-  return { total: roundedTotal, grade, breakdown };
+  return { total: Math.round(total), breakdown };
 }

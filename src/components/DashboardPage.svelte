@@ -3,19 +3,30 @@
   import { currentUser, authLoading } from '../lib/authStore';
   import HistoryTab from './HistoryTab.svelte';
   import BatchScansTab from './BatchScansTab.svelte';
-  import ScheduledScansTab from './ScheduledScansTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
+  import AdminTab from './AdminTab.svelte';
+  import MonitoringTab from './MonitoringTab.svelte';
 
   let user: import('../lib/authStore').AuthUser | null = null;
   let loading = true;
-  let activeTab = 'history';
 
-  const tabs = [
+  // Restore tab from URL hash on load
+  function getTabFromHash(): string {
+    const params = new URLSearchParams(window.location.hash.replace(/^#\/dashboard\??/, ''));
+    return params.get('tab') || 'history';
+  }
+  let activeTab = getTabFromHash();
+
+  const baseTabs = [
     { id: 'history', label: 'History' },
+    { id: 'monitoring', label: 'Monitoring' },
     { id: 'batch', label: 'Batch Scans' },
-    { id: 'scheduled', label: 'Scheduled Scans' },
     { id: 'settings', label: 'Settings' },
   ];
+
+  $: tabs = user?.role === 'admin'
+    ? [...baseTabs, { id: 'admin', label: 'Admin' }]
+    : baseTabs;
 
   const unsubUser = currentUser.subscribe(v => {
     user = v;
@@ -33,6 +44,7 @@
 
   function selectTab(id: string) {
     activeTab = id;
+    window.location.hash = `#/dashboard?tab=${id}`;
   }
 
   function handleTabKeydown(e: KeyboardEvent, id: string) {
@@ -74,10 +86,12 @@
         <HistoryTab />
       {:else if activeTab === 'batch'}
         <BatchScansTab />
-      {:else if activeTab === 'scheduled'}
-        <ScheduledScansTab />
       {:else if activeTab === 'settings'}
         <SettingsTab />
+      {:else if activeTab === 'monitoring'}
+        <MonitoringTab />
+      {:else if activeTab === 'admin'}
+        <AdminTab />
       {/if}
     </div>
   </div>

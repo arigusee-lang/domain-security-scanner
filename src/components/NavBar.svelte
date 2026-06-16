@@ -92,7 +92,7 @@
             aria-haspopup="true"
           >
             {#if user.avatarUrl}
-              <img class="avatar" src={user.avatarUrl} alt="" width="24" height="24" />
+              <img class="avatar" src={user.avatarUrl} alt="" width="24" height="24" referrerpolicy="no-referrer" />
             {:else}
               <span class="avatar-placeholder">{(user.name || user.email)[0].toUpperCase()}</span>
             {/if}

@@ -4,7 +4,7 @@
 
   export let title: string;
   export let status: CheckStatus;
-  export let expanded: boolean = false;
+  export let expanded: boolean = true;
   export let subtitle: string = '';
 
   const id = `rc-${title.replace(/\s+/g, '-').toLowerCase()}`;
@@ -95,6 +95,7 @@
     border-left: 7px solid var(--color-text-secondary);
     transition: transform var(--transition);
     flex-shrink: 0;
+    margin-left: auto;
   }
 
   .chevron.open {

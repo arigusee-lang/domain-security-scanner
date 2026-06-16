@@ -22,6 +22,7 @@ export function createAuth(db: Database.Database) {
       avatarUrl: attributes.avatar_url,
       provider: attributes.provider,
       plan: attributes.plan,
+      role: attributes.role,
     }),
   });
 
@@ -44,6 +45,21 @@ export function createAuth(db: Database.Database) {
   return { lucia, google, github };
 }
 
+/** Sync admin role for emails listed in ADMIN_EMAILS env var. Idempotent. */
+export function syncAdminEmails(db: import("better-sqlite3").Database): void {
+  const adminEmails = (process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (adminEmails.length === 0) return;
+
+  const placeholders = adminEmails.map(() => "?").join(", ");
+  db.prepare(
+    `UPDATE users SET role = 'admin' WHERE LOWER(email) IN (${placeholders})`
+  ).run(...adminEmails);
+}
+
 declare module "lucia" {
   interface Register {
     Lucia: ReturnType<typeof createAuth>["lucia"];
@@ -56,5 +72,7 @@ interface DatabaseUserAttributes {
   name: string | null;
   avatar_url: string | null;
   provider: "google" | "github";
-  plan: "registered" | "pro" | "enterprise";
+  plan: "free" | "premium" | "premium_plus";
+  role: "user" | "admin";
+  last_login_at: string | null;
 }

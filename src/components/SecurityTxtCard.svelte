@@ -3,6 +3,11 @@
   import ResultCard from './ResultCard.svelte';
 
   export let data: SecurityTxtSection;
+  export let domain: string = '';
+
+  $: learnHref = domain
+    ? `/#/security-txt?domain=${encodeURIComponent(domain)}`
+    : '/#/security-txt';
 
   $: statusLabel = data.available
     ? data.validationStatus === 'valid' ? 'Valid'
@@ -44,7 +49,7 @@
     {/if}
   {/if}
 
-  <a class="learn-link" href="/#/security-txt">Learn more about security.txt →</a>
+  <a class="learn-link" href={learnHref}>Learn more about security.txt →</a>
 </ResultCard>
 
 <style>

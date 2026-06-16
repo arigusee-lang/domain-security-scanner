@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get, del } from '../lib/api';
+  import { currentUser } from '../lib/authStore';
 
   interface ScanItem {
     id: string;
     domain: string;
-    grade: string | null;
     score: number | null;
     created_at: string;
     status: string;
@@ -16,6 +16,11 @@
   let error = '';
   let page = 1;
   let totalPages = 1;
+  let total = 0;
+  let historyCap: number | null = null;
+
+  $: plan = $currentUser?.plan;
+  $: capReached = historyCap !== null && total >= historyCap;
 
   onMount(() => loadScans());
 
@@ -23,11 +28,13 @@
     loading = true;
     error = '';
     try {
-      const res = await get<{ scans: ScanItem[]; total: number; page: number; totalPages: number }>(
-        `/api/scans?page=${page}`
-      );
+      const res = await get<{
+        scans: ScanItem[]; total: number; page: number; totalPages: number; historyCap?: number;
+      }>(`/api/scans?page=${page}`);
       scans = res.scans;
       totalPages = res.totalPages;
+      total = res.total;
+      historyCap = res.historyCap ?? null;
     } catch (e: any) {
       error = e.message || 'Failed to load scans';
     } finally {
@@ -59,6 +66,19 @@
 </script>
 
 <div class="history-tab">
+  {#if !loading && !error && capReached && historyCap !== null}
+    <div class="cap-banner" role="note">
+      <span>
+        Showing the {historyCap} most recent scans on the
+        <strong>{plan === 'free' ? 'Free' : plan === 'premium' ? 'Premium' : 'Premium+'}</strong> plan.
+        Older entries are pruned automatically.
+      </span>
+      {#if plan === 'free'}
+        <a class="upgrade-link" href="#/dashboard?tab=settings">Upgrade →</a>
+      {/if}
+    </div>
+  {/if}
+
   {#if loading}
     <p class="status-msg">Loading scans…</p>
   {:else if error}
@@ -71,7 +91,7 @@
         <tr>
           <th>Domain</th>
           <th>Date</th>
-          <th>Grade</th>
+          <th>Score</th>
           <th>Report</th>
           <th></th>
         </tr>
@@ -81,7 +101,7 @@
           <tr>
             <td class="domain-cell">{scan.domain}</td>
             <td class="date-cell">{formatDate(scan.created_at)}</td>
-            <td class="grade-cell">{scan.grade || '—'}</td>
+            <td class="score-cell">{scan.score != null ? Math.round(scan.score) : '—'}</td>
             <td>
               <a class="report-link" href="/#/?domain={encodeURIComponent(scan.domain)}&scanId={scan.id}&view=history">View</a>
             </td>
@@ -157,8 +177,9 @@
     font-size: 0.75rem;
   }
 
-  .grade-cell {
+  .score-cell {
     font-weight: 600;
+    font-family: var(--font-mono);
   }
 
   .report-link {
@@ -217,5 +238,34 @@
   .page-info {
     font-size: 0.75rem;
     color: var(--color-text-secondary);
+  }
+
+  .cap-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 184, 77, 0.08);
+    border: 1px solid rgba(255, 184, 77, 0.3);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-size: 0.75rem;
+  }
+
+  .cap-banner strong {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .upgrade-link {
+    color: var(--color-accent);
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .upgrade-link:hover {
+    text-decoration: underline;
   }
 </style>

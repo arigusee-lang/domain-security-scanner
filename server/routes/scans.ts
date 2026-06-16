@@ -2,6 +2,7 @@ import { Router } from "express";
 import type Database from "better-sqlite3";
 import type { Lucia } from "lucia";
 import { requireAuth } from "../middleware/authMiddleware.js";
+import { SCAN_HISTORY_LIMITS } from "../db.js";
 import type { ScanRow } from "../types.js";
 
 interface ScansDeps {
@@ -15,12 +16,18 @@ export function createScansRoutes({ db }: ScansDeps): Router {
   // GET /api/scans — paginated list with filters
   router.get("/", requireAuth, (req, res) => {
     const userId = req.user!.id;
+    const planCap = SCAN_HISTORY_LIMITS[req.user!.plan];
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
     const limit = 20;
     const offset = (page - 1) * limit;
 
-    const conditions: string[] = ["user_id = ?"];
-    const params: unknown[] = [userId];
+    // Cap to the most recent `planCap` rows for this user, then apply filters
+    // on top. This makes the cap robust to cleanup lag — anything past N is
+    // never visible even if the daily cleanup job hasn't pruned it yet.
+    const conditions: string[] = [
+      `id IN (SELECT id FROM scans WHERE user_id = ? AND scan_type = 'single' ORDER BY created_at DESC LIMIT ?)`,
+    ];
+    const params: unknown[] = [userId, planCap];
 
     // Filter by domain
     if (req.query.domain) {
@@ -28,15 +35,15 @@ export function createScansRoutes({ db }: ScansDeps): Router {
       params.push(`%${req.query.domain}%`);
     }
 
-    // Filter by status (grade-based: pass/warn/fail)
+    // Filter by status (score-based: pass=85+, warn=55–84, fail=<55)
     if (req.query.status) {
       const status = req.query.status as string;
       if (status === "pass") {
-        conditions.push("grade IN ('A+', 'A')");
+        conditions.push("score >= 85");
       } else if (status === "warn") {
-        conditions.push("grade IN ('B', 'C')");
+        conditions.push("score >= 55 AND score < 85");
       } else if (status === "fail") {
-        conditions.push("grade IN ('D', 'F')");
+        conditions.push("score < 55");
       }
     }
 
@@ -58,7 +65,7 @@ export function createScansRoutes({ db }: ScansDeps): Router {
 
     const scans = db
       .prepare(
-        `SELECT id, domain, scan_type, status, score, grade, created_at, completed_at
+        `SELECT id, domain, scan_type, status, score, created_at, completed_at
          FROM scans WHERE ${where}
          ORDER BY created_at DESC LIMIT ? OFFSET ?`
       )
@@ -69,14 +76,20 @@ export function createScansRoutes({ db }: ScansDeps): Router {
       page,
       totalPages: Math.ceil(total / limit),
       total,
+      historyCap: planCap,
     });
   });
 
   // GET /api/scans/:id — full scan result
   router.get("/:id", requireAuth, (req, res) => {
     const scan = db
-      .prepare("SELECT * FROM scans WHERE id = ?")
-      .get(req.params.id) as ScanRow | undefined;
+      .prepare(`
+        SELECT s.*, b.name AS batch_name
+        FROM scans s
+        LEFT JOIN batch_scans b ON b.id = s.batch_id
+        WHERE s.id = ?
+      `)
+      .get(req.params.id) as (ScanRow & { batch_name: string | null }) | undefined;
 
     if (!scan) {
       res.status(404).json({ error: "not_found", message: "Scan not found" });

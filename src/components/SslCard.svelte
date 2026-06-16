@@ -26,12 +26,14 @@
 
   $: daysClass = data.daysRemaining == null ? ''
     : data.daysRemaining < 0 ? 'expired'
-    : data.daysRemaining <= 30 ? 'expiring'
+    : data.daysRemaining <= 30 ? (data.managedBy ? 'managed' : 'expiring')
     : 'ok';
 
-  $: subtitle = data.daysRemaining != null
-    ? (data.daysRemaining < 0 ? 'Expired' : `${data.daysRemaining} days remaining`)
-    : data.error || '';
+  $: subtitle = (() => {
+    if (data.daysRemaining == null) return data.error || '';
+    const days = data.daysRemaining < 0 ? 'Expired' : `${data.daysRemaining} days remaining`;
+    return data.managedBy ? `${days} · Managed by ${data.managedBy}` : days;
+  })();
 </script>
 
 <ResultCard title="SSL/TLS Certificate" status={data.status} {subtitle}>
@@ -49,6 +51,15 @@
           {data.daysRemaining != null ? (data.daysRemaining < 0 ? 'Expired' : data.daysRemaining) : '—'}
         </span>
       </div>
+      {#if data.managedBy}
+        <div class="ssl-row">
+          <span class="ssl-label">Managed by</span>
+          <span class="ssl-value managed-by">
+            {data.managedBy}
+            <span class="managed-hint">— this provider auto-rotates the cert; expiry tracking isn't your responsibility</span>
+          </span>
+        </div>
+      {/if}
     </div>
     {#if data.sans.length > 0}
       <div class="sans-section">
@@ -96,6 +107,65 @@
             {/each}
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if data.edges && data.edges.samples.length > 0}
+      <div class="deep-section">
+        <h4 class="section-title">
+          Edge Samples ({data.edges.samples.length})
+          {#if data.edges.consistency === 'consistent'}
+            <span class="edge-summary edge-summary-pass">✓ All edges serve the same cert</span>
+          {:else if data.edges.consistency === 'rollout'}
+            <span class="edge-summary edge-summary-info">{data.edges.distinctFingerprints} distinct certs — rollout in progress</span>
+          {:else if data.edges.consistency === 'inconsistent'}
+            <span class="edge-summary edge-summary-fail">⚠ Inconsistent cert state</span>
+          {/if}
+        </h4>
+        <!-- Collapse the table when everything is consistent — it's just
+             verification data; show by default only when there's something
+             to investigate (rollout in progress or a real mismatch). -->
+        <details class="edges-details" open={data.edges.consistency !== 'consistent'}>
+          <summary>Show per-edge details</summary>
+        <table class="sct-table">
+          <thead>
+            <tr>
+              <th>IP</th>
+              <th>Issuer</th>
+              <th>Days</th>
+              <th>Fingerprint (sha256)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each data.edges.samples as s}
+              <tr>
+                <td><code class="ip-code">{s.ip}</code></td>
+                <td>{s.error ? '—' : (s.issuer || '—')}</td>
+                <td>{s.error ? '—' : s.daysRemaining}</td>
+                <td>
+                  {#if s.fingerprint}
+                    <code class="fp-code" title={s.fingerprint}>{s.fingerprint.slice(0, 16)}…</code>
+                  {:else}
+                    —
+                  {/if}
+                </td>
+                <td>
+                  {#if s.error}
+                    <span class="status-badge badge-fail" title={s.error}>error</span>
+                  {:else if !s.sanMatch}
+                    <span class="status-badge badge-fail">SAN mismatch</span>
+                  {:else if !s.chainOk}
+                    <span class="status-badge badge-fail">chain broken</span>
+                  {:else}
+                    <span class="status-badge badge-pass">ok</span>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        </details>
       </div>
     {/if}
 
@@ -179,7 +249,11 @@
 
   .days.ok { color: var(--color-valid); font-weight: 600; }
   .days.expiring { color: var(--color-warning); font-weight: 600; }
+  .days.managed { color: var(--color-info); font-weight: 600; }
   .days.expired { color: var(--color-error); font-weight: 600; }
+
+  .managed-by { color: var(--color-info); font-weight: 500; }
+  .managed-hint { color: var(--color-text-secondary); font-weight: 400; font-size: 0.7rem; margin-left: 0.3rem; }
 
   .sans-section {
     margin-top: 0.6rem;
@@ -360,5 +434,39 @@
     padding: 0.3rem 0.5rem;
     color: var(--color-text);
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  }
+
+  /* Edge samples */
+  .edge-summary {
+    font-size: 0.7rem;
+    font-weight: 500;
+    margin-left: 0.5rem;
+  }
+  .edge-summary-pass { color: var(--color-valid); }
+  .edge-summary-info { color: var(--color-info); }
+  .edge-summary-fail { color: var(--color-error); }
+  .ip-code,
+  .fp-code {
+    font-family: var(--font-mono);
+    background: var(--color-bg);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.68rem;
+  }
+  .fp-code {
+    cursor: help;
+  }
+  .edges-details summary {
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.72rem;
+    color: var(--color-text-secondary);
+    padding: 0.2rem 0;
+  }
+  .edges-details summary:hover {
+    color: var(--color-text);
+  }
+  .edges-details[open] summary {
+    margin-bottom: 0.3rem;
   }
 </style>

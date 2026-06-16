@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import type { CheckStatus } from "../types.js";
+import { safeResolve } from "../lib/dnsResolve.js";
 
 export interface DanglingRecord {
   type: "MX" | "NS";
@@ -16,18 +17,12 @@ export interface DanglingDnsResult {
 
 async function canResolve(hostname: string, timeout: number): Promise<boolean> {
   try {
-    await Promise.race([
-      dns.resolve4(hostname),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
-    ]);
+    await safeResolve(() => dns.resolve4(hostname), timeout);
     return true;
   } catch {
     // Try IPv6 as fallback
     try {
-      await Promise.race([
-        dns.resolve6(hostname),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
-      ]);
+      await safeResolve(() => dns.resolve6(hostname), timeout);
       return true;
     } catch {
       return false;
@@ -43,18 +38,12 @@ export async function checkDanglingDns(domain: string, timeout: number = 5000): 
   let nsHosts: string[] = [];
 
   try {
-    const mx = await Promise.race([
-      dns.resolveMx(domain),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
-    ]);
+    const mx = await safeResolve(() => dns.resolveMx(domain), timeout);
     mxHosts = mx.map(r => r.exchange);
   } catch { /* no MX is fine */ }
 
   try {
-    const ns = await Promise.race([
-      dns.resolveNs(domain),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout)),
-    ]);
+    const ns = await safeResolve(() => dns.resolveNs(domain), timeout);
     nsHosts = ns;
   } catch { /* no NS is fine */ }
 

@@ -5,8 +5,12 @@ import type { Lucia } from "lucia";
 import { requireAuth } from "../middleware/authMiddleware.js";
 import { requirePlan } from "../middleware/planGating.js";
 import { runBatchScan } from "../batchScanner.js";
+import { BATCH_HISTORY_LIMITS } from "../db.js";
 import type { BatchScanRow, BatchScanDomainRow, ScanRow, ScanConfig } from "../types.js";
 import { DEFAULT_SCAN_CONFIG } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("batch");
 
 interface BatchDeps {
   db: Database.Database;
@@ -29,7 +33,7 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
   const router = Router();
 
   // POST /api/batch — create batch scan
-  router.post("/", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.post("/", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const { domains: rawDomains, csv, config, name } = req.body as {
       domains?: string[];
@@ -62,7 +66,10 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
 
     const batchId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const scanConfig = config ?? DEFAULT_SCAN_CONFIG;
+    // Subdomain CT lookup is gated to premium_plus only. Regular premium still
+    // gets batch scanning but without subdomain enrichment.
+    const isPlus = req.user!.plan === "premium_plus";
+    const scanConfig: ScanConfig = { ...(config ?? DEFAULT_SCAN_CONFIG), authenticated: isPlus };
 
     // Create batch_scans row
     db.prepare(
@@ -80,7 +87,7 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
 
     // Start batch scan in background (don't await)
     runBatchScan({ batchId, domains, userId, config: scanConfig }, db).catch((err) => {
-      console.error(`[batch] Background batch scan ${batchId} failed:`, err);
+      log.error({ err, batchId }, "background batch scan failed");
       db.prepare("UPDATE batch_scans SET status = 'failed' WHERE id = ?").run(batchId);
     });
 
@@ -92,22 +99,31 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
   });
 
   // GET /api/batch — list user's batches with pagination
-  router.get("/", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.get("/", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
+    const planCap = BATCH_HISTORY_LIMITS[req.user!.plan];
     const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
     const limit = 20;
     const offset = (page - 1) * limit;
 
+    // Same clipping pattern as /api/scans — cap visible rows to the per-plan
+    // retention even if cleanup hasn't run yet.
     const total = (
-      db.prepare("SELECT COUNT(*) as cnt FROM batch_scans WHERE user_id = ?").get(userId) as { cnt: number }
+      db
+        .prepare(
+          `SELECT COUNT(*) as cnt FROM batch_scans
+           WHERE id IN (SELECT id FROM batch_scans WHERE user_id = ? ORDER BY created_at DESC LIMIT ?)`,
+        )
+        .get(userId, planCap) as { cnt: number }
     ).cnt;
 
     const batches = db
       .prepare(
-        `SELECT * FROM batch_scans WHERE user_id = ?
-         ORDER BY created_at DESC LIMIT ? OFFSET ?`
+        `SELECT * FROM batch_scans
+         WHERE id IN (SELECT id FROM batch_scans WHERE user_id = ? ORDER BY created_at DESC LIMIT ?)
+         ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
-      .all(userId, limit, offset) as BatchScanRow[];
+      .all(userId, planCap, limit, offset) as BatchScanRow[];
 
     res.json({
       batches: batches.map((b) => ({
@@ -117,11 +133,12 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
       page,
       totalPages: Math.ceil(total / limit),
       total,
+      historyCap: planCap,
     });
   });
 
   // GET /api/batch/:id — batch status, progress, completed domain results
-  router.get("/:id", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.get("/:id", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const batch = db
       .prepare("SELECT * FROM batch_scans WHERE id = ? AND user_id = ?")
@@ -141,8 +158,8 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
       .filter((d) => d.scan_id)
       .map((d) => {
         const scan = db
-          .prepare("SELECT id, domain, score, grade, status, created_at FROM scans WHERE id = ?")
-          .get(d.scan_id!) as Pick<ScanRow, "id" | "domain" | "score" | "grade" | "status" | "created_at"> | undefined;
+          .prepare("SELECT id, domain, score, status, created_at FROM scans WHERE id = ?")
+          .get(d.scan_id!) as Pick<ScanRow, "id" | "domain" | "score" | "status" | "created_at"> | undefined;
         return { ...d, scan: scan ?? null };
       });
 
@@ -156,7 +173,7 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
   });
 
   // GET /api/batch/:id/csv — CSV export
-  router.get("/:id/csv", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  router.get("/:id/csv", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
     const batch = db
       .prepare("SELECT * FROM batch_scans WHERE id = ? AND user_id = ?")
@@ -172,19 +189,19 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
       .all(req.params.id) as BatchScanDomainRow[];
 
     // CSV header
-    let csv = "domain,status,score,grade\n";
+    let csv = "domain,status,score\n";
 
     for (const d of domains) {
       if (d.scan_id) {
         const scan = db
-          .prepare("SELECT domain, score, grade, status FROM scans WHERE id = ?")
-          .get(d.scan_id) as Pick<ScanRow, "domain" | "score" | "grade" | "status"> | undefined;
+          .prepare("SELECT domain, score, status FROM scans WHERE id = ?")
+          .get(d.scan_id) as Pick<ScanRow, "domain" | "score" | "status"> | undefined;
         if (scan) {
-          csv += `${escapeCsvField(scan.domain)},${d.status},${scan.score ?? ""},${scan.grade ?? ""}\n`;
+          csv += `${escapeCsvField(scan.domain)},${d.status},${scan.score ?? ""}\n`;
           continue;
         }
       }
-      csv += `${escapeCsvField(d.domain)},${d.status},,\n`;
+      csv += `${escapeCsvField(d.domain)},${d.status},\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
@@ -192,29 +209,16 @@ export function createBatchRoutes({ db }: BatchDeps): Router {
     res.send(csv);
   });
 
-  // DELETE /api/batch/:id — cascade delete batch + domains + linked scans
-  router.delete("/:id", requireAuth, requirePlan("pro", "enterprise"), (req, res) => {
+  // DELETE /api/batch/:id — cascade deletes batch_scan_domains and child scan rows
+  router.delete("/:id", requireAuth, requirePlan("premium", "premium_plus"), (req, res) => {
     const userId = req.user!.id;
-    const batch = db
-      .prepare("SELECT id FROM batch_scans WHERE id = ? AND user_id = ?")
-      .get(req.params.id, userId) as { id: string } | undefined;
-
-    if (!batch) {
+    const result = db
+      .prepare("DELETE FROM batch_scans WHERE id = ? AND user_id = ?")
+      .run(req.params.id, userId);
+    if (result.changes === 0) {
       res.status(404).json({ error: "not_found", message: "Batch not found" });
       return;
     }
-
-    // Delete linked scans first
-    const domainRows = db
-      .prepare("SELECT scan_id FROM batch_scan_domains WHERE batch_id = ? AND scan_id IS NOT NULL")
-      .all(req.params.id) as Array<{ scan_id: string }>;
-
-    for (const { scan_id } of domainRows) {
-      db.prepare("DELETE FROM scans WHERE id = ?").run(scan_id);
-    }
-
-    // batch_scan_domains will cascade delete with batch_scans
-    db.prepare("DELETE FROM batch_scans WHERE id = ?").run(req.params.id);
     res.status(204).send();
   });
 

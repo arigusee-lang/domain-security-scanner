@@ -1,4 +1,7 @@
 import type { CheckStatus } from "../types.js";
+import { createLogger } from "../lib/logger.js";
+
+const log = createLogger("upstream");
 
 export interface SafeBrowsingThreat {
   threatType: string;
@@ -45,6 +48,7 @@ export async function checkSafeBrowsing(domain: string, timeout: number = 5000):
     clearTimeout(timer);
 
     if (!res.ok) {
+      log.warn({ upstream: "safebrowsing", status: res.status, domain }, "upstream returned non-2xx");
       return { status: "info", safe: null, threats: [], error: `API returned HTTP ${res.status}` };
     }
 
@@ -61,7 +65,8 @@ export async function checkSafeBrowsing(domain: string, timeout: number = 5000):
     }));
 
     return { status: "fail", safe: false, threats };
-  } catch {
+  } catch (err: any) {
+    log.warn({ upstream: "safebrowsing", domain, err: err?.name || err?.message || String(err) }, "upstream request failed");
     return { status: "info", safe: null, threats: [], error: "Safe Browsing lookup failed" };
   }
 }

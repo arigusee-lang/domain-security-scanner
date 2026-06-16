@@ -7,6 +7,9 @@
 
   export let data: CtLogsResult;
   export let authenticated: boolean = false;
+  // Whether the current user is entitled to see subdomain certificates
+  // (premium_plus tier). Controls which upsell message to render below.
+  export let hasSubdomainAccess: boolean = false;
 
   let showAllRecent = false;
   let showAllFlagged = false;
@@ -29,6 +32,15 @@
     if (!cachedAt) return '';
     const diff = Date.now() - new Date(cachedAt).getTime();
     const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h`;
+    return `${Math.floor(hours / 24)}d`;
+  }
+
+  function staleAge(seconds: number | undefined): string {
+    if (!seconds || seconds < 60) return `${seconds ?? 0}s`;
+    const mins = Math.floor(seconds / 60);
     if (mins < 60) return `${mins}m`;
     const hours = Math.floor(mins / 60);
     if (hours < 24) return `${hours}h`;
@@ -137,22 +149,39 @@
       {/if}
     {/if}
 
-    <!-- CSV download + auth message -->
+    <!-- CSV download + auth/upsell message -->
     <div class="actions-row">
       {#if authenticated}
         <button class="csv-btn" on:click={() => downloadCsv(allCerts, domain)}>Download CSV</button>
-      {:else}
-        <p class="auth-msg">Sign in to see subdomain certificates</p>
+      {/if}
+      {#if !hasSubdomainAccess}
+        <p class="auth-msg">
+          {#if authenticated}
+            Upgrade to Premium+ to see subdomain certificates
+          {:else}
+            Sign in to see subdomain certificates
+          {/if}
+        </p>
       {/if}
     </div>
 
     <!-- Source indicator -->
-    {#if data.source === 'cache'}
-      <p class="source cache-note">Cached data (age: {cacheAge(data.cachedAt)})</p>
-    {:else if data.source === 'certspotter'}
-      <p class="source">Data from <a href="https://sslmate.com/certspotter/" target="_blank" rel="noopener">CertSpotter</a></p>
-    {:else}
-      <p class="source">Data from <a href="https://crt.sh/?q={encodeURIComponent('%.'+domain)}" target="_blank" rel="noopener">crt.sh</a></p>
+    {#if data.source !== 'none'}
+      <p class="source" class:cache-note={data.fromCache && !data.stale} class:stale-note={data.stale}>
+        Data from
+        {#if data.source === 'certspotter'}
+          <a href="https://sslmate.com/certspotter/" target="_blank" rel="noopener">CertSpotter</a>
+        {:else}
+          <a href="https://crt.sh/?q={encodeURIComponent('%.'+domain)}" target="_blank" rel="noopener">crt.sh</a>
+        {/if}
+        {#if data.stale}
+          <span class="stale-tag" title="Upstream CT sources unavailable — showing last known data">
+            ⚠ stale ({staleAge(data.staleSeconds)} old)
+          </span>
+        {:else if data.fromCache}
+          (cached {cacheAge(data.cachedAt)} ago)
+        {/if}
+      </p>
     {/if}
   {/if}
 </ResultCard>
@@ -194,6 +223,19 @@
   .auth-msg { font-size: 0.7rem; color: var(--color-text-secondary); opacity: 0.7; font-style: italic; }
   .source { font-size: 0.7rem; color: var(--color-text-secondary); opacity: 0.6; margin-top: 0.4rem; }
   .cache-note { font-style: italic; }
+  .stale-note { opacity: 1; }
+  .stale-tag {
+    margin-left: 0.3rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    background: rgba(255, 184, 77, 0.12);
+    color: var(--color-warning);
+    font-size: 0.65rem;
+    font-weight: 500;
+    font-style: normal;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
   .refresh-btn {
     background: none; border: 1px solid var(--color-border); border-radius: var(--radius);
     color: var(--color-text-secondary); font-size: 0.85rem; padding: 0.15rem 0.4rem;

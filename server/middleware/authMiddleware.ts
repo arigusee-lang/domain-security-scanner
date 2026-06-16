@@ -71,3 +71,23 @@ export function requireAuth(
   }
   next();
 }
+
+/**
+ * Admin guard — returns 401 if not authenticated, 403 if not admin.
+ * Must be used after authMiddleware.
+ */
+export function requireAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.user) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  if ((req.user as any).role !== "admin") {
+    res.status(403).json({ error: "forbidden" });
+    return;
+  }
+  next();
+}

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
 
+  export let initialUrl = '';
+
   const dispatch = createEventDispatcher<{
     validate: { mode: 'paste' | 'url' | 'generate'; content: string; domain: string };
   }>();
@@ -14,7 +16,7 @@
 
   let activeTab: Tab = 'url';
   let pasteContent = '';
-  let urlInput = '';
+  let urlInput = initialUrl;
   let errorMessage = '';
   let urlWarning = '';
   let isDragging = false;

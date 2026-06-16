@@ -4,6 +4,10 @@ import crypto from "node:crypto";
 import type { Lucia } from "lucia";
 import type Database from "better-sqlite3";
 import { requireAuth } from "../middleware/authMiddleware.js";
+import { createLogger } from "../lib/logger.js";
+
+const googleLog = createLogger("auth/google");
+const githubLog = createLogger("auth/github");
 
 /** In dev, redirect to Vite dev server; in prod, redirect to same origin */
 const FRONTEND_URL = process.env.APP_URL || "http://localhost:5173";
@@ -48,7 +52,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
 
       res.redirect(url.toString());
     } catch (err) {
-      console.error("[auth/google] init error:", err);
+      googleLog.error({ err }, "init error");
       res.redirect(frontendRedirect("/?auth_error=1"));
     }
   });
@@ -64,10 +68,10 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
         ?? parseCookie(req.headers.cookie ?? "", "google_code_verifier");
 
       if (!code || !state || !storedState || state !== storedState || !codeVerifier) {
-        console.error("[auth/google] state mismatch", {
+        googleLog.error({
           hasCode: !!code, hasState: !!state, hasStoredState: !!storedState,
           match: state === storedState, hasVerifier: !!codeVerifier,
-        });
+        }, "state mismatch");
         return res.redirect(frontendRedirect("/?auth_error=1"));
       }
 
@@ -79,7 +83,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       if (!userResponse.ok) {
-        console.error("[auth/google] userinfo fetch failed", userResponse.status);
+        googleLog.error({ status: userResponse.status }, "userinfo fetch failed");
         return res.redirect(frontendRedirect("/?auth_error=1"));
       }
 
@@ -110,7 +114,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
 
       res.redirect(frontendRedirect("/"));
     } catch (err) {
-      console.error("[auth/google] callback error:", err);
+      googleLog.error({ err }, "callback error");
       res.redirect(frontendRedirect("/?auth_error=1"));
     }
   });
@@ -135,7 +139,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
 
       res.redirect(url.toString());
     } catch (err) {
-      console.error("[auth/github] init error:", err);
+      githubLog.error({ err }, "init error");
       res.redirect(frontendRedirect("/?auth_error=1"));
     }
   });
@@ -149,10 +153,10 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
         ?? parseCookie(req.headers.cookie ?? "", "github_oauth_state");
 
       if (!code || !state || !storedState || state !== storedState) {
-        console.error("[auth/github] state mismatch", {
+        githubLog.error({
           hasCode: !!code, hasState: !!state, hasStoredState: !!storedState,
           match: state === storedState,
-        });
+        }, "state mismatch");
         return res.redirect(frontendRedirect("/?auth_error=1"));
       }
 
@@ -164,7 +168,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!userResponse.ok) {
-        console.error("[auth/github] user fetch failed", userResponse.status, await userResponse.text());
+        githubLog.error({ status: userResponse.status, body: await userResponse.text() }, "user fetch failed");
         return res.redirect(frontendRedirect("/?auth_error=1"));
       }
 
@@ -194,7 +198,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
       }
 
       if (!email) {
-        console.error("[auth/github] no email found for user", githubUser.login);
+        githubLog.error({ login: githubUser.login }, "no email found for user");
         return res.redirect(frontendRedirect("/?auth_error=1"));
       }
 
@@ -217,7 +221,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
 
       res.redirect(frontendRedirect("/"));
     } catch (err) {
-      console.error("[auth/github] callback error:", err);
+      githubLog.error({ err }, "callback error");
       res.redirect(frontendRedirect("/?auth_error=1"));
     }
   });
@@ -250,6 +254,7 @@ export function createAuthRoutes({ lucia, google, github, db }: AuthDeps): Route
       name: req.user.name,
       avatarUrl: req.user.avatarUrl,
       plan: req.user.plan,
+      role: (req.user as any).role,
     });
   });
 
@@ -275,6 +280,11 @@ export function upsertUser(
   db: Database.Database,
   profile: OAuthProfile
 ): { id: string } {
+  const adminEmails = (process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+
   // 1. Exact match on provider + provider_id (returning user, same provider)
   const byProvider = db
     .prepare("SELECT id FROM users WHERE provider = ? AND provider_id = ?")
@@ -282,7 +292,7 @@ export function upsertUser(
 
   if (byProvider) {
     db.prepare(
-      "UPDATE users SET name = ?, avatar_url = ?, email = ? WHERE id = ?"
+      "UPDATE users SET name = ?, avatar_url = ?, email = ?, last_login_at = datetime('now') WHERE id = ?"
     ).run(profile.name, profile.avatarUrl, profile.email, byProvider.id);
     return { id: byProvider.id };
   }
@@ -294,17 +304,18 @@ export function upsertUser(
 
   if (byEmail) {
     db.prepare(
-      "UPDATE users SET name = ?, avatar_url = ?, provider = ?, provider_id = ? WHERE id = ?"
+      "UPDATE users SET name = ?, avatar_url = ?, provider = ?, provider_id = ?, last_login_at = datetime('now') WHERE id = ?"
     ).run(profile.name, profile.avatarUrl, profile.provider, profile.providerId, byEmail.id);
     return { id: byEmail.id };
   }
 
   // 3. Brand new user
   const id = crypto.randomUUID();
+  const role = adminEmails.includes(profile.email.toLowerCase()) ? "admin" : "user";
   db.prepare(
-    `INSERT INTO users (id, email, name, avatar_url, provider, provider_id, plan)
-     VALUES (?, ?, ?, ?, ?, ?, 'registered')`
-  ).run(id, profile.email, profile.name, profile.avatarUrl, profile.provider, profile.providerId);
+    `INSERT INTO users (id, email, name, avatar_url, provider, provider_id, plan, role, last_login_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'free', ?, datetime('now'))`
+  ).run(id, profile.email, profile.name, profile.avatarUrl, profile.provider, profile.providerId, role);
 
   return { id };
 }

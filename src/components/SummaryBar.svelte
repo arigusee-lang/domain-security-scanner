@@ -3,12 +3,18 @@
   import CheckStatusIcon from './CheckStatusIcon.svelte';
 
   export let checks: { label: string; status: CheckStatus }[] = [];
+  export let score: number | null = null;
+
+  $: scoreInt = score !== null ? Math.ceil(score) : null;
+  $: scoreClass = scoreInt === null ? ''
+    : scoreInt >= 90 ? 'score-good'
+    : scoreInt >= 70 ? 'score-warn'
+    : 'score-bad';
 
   $: passCount = checks.filter(c => c.status === 'pass').length;
   $: warnCount = checks.filter(c => c.status === 'warn').length;
   $: failCount = checks.filter(c => c.status === 'fail').length;
-  $: infoCount = checks.filter(c => c.status === 'info').length;
-  $: total = checks.length;
+  $: total = passCount + warnCount + failCount;
 
   $: overallStatus = failCount > 0 ? 'fail' as CheckStatus
     : warnCount > 0 ? 'warn' as CheckStatus
@@ -24,20 +30,23 @@
 
 <div class="summary-bar {overallClass}" role="status">
   <div class="summary-main">
+    {#if scoreInt !== null}
+      <span class="score-pill {scoreClass}" aria-label="Security score {scoreInt} out of 100">
+        <span class="score-value">{scoreInt}</span><span class="score-total">/100</span>
+      </span>
+    {/if}
     <CheckStatusIcon status={overallStatus} />
     <span class="summary-label">{overallLabel}</span>
     <span class="summary-counts">
       {#if passCount > 0}<span class="count pass-count">{passCount} passed</span>{/if}
       {#if warnCount > 0}<span class="count warn-count">{warnCount} warnings</span>{/if}
       {#if failCount > 0}<span class="count fail-count">{failCount} failed</span>{/if}
-      {#if infoCount > 0}<span class="count info-count">{infoCount} info</span>{/if}
     </span>
   </div>
   <div class="progress-bar">
     {#if passCount > 0}<div class="seg pass-seg" style="width: {passCount / total * 100}%"></div>{/if}
     {#if warnCount > 0}<div class="seg warn-seg" style="width: {warnCount / total * 100}%"></div>{/if}
     {#if failCount > 0}<div class="seg fail-seg" style="width: {failCount / total * 100}%"></div>{/if}
-    {#if infoCount > 0}<div class="seg info-seg" style="width: {infoCount / total * 100}%"></div>{/if}
   </div>
 </div>
 
@@ -59,6 +68,40 @@
     gap: 0.5rem;
     flex-wrap: wrap;
   }
+
+  .score-pill {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 1px;
+    padding: 0.25rem 0.55rem;
+    border-radius: 999px;
+    background: var(--color-surface-2, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--color-border);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-right: 0.25rem;
+  }
+
+  .score-pill.score-good {
+    background: rgba(0, 212, 170, 0.12);
+    border-color: rgba(0, 212, 170, 0.45);
+    color: var(--color-valid);
+  }
+  .score-pill.score-warn {
+    background: rgba(255, 184, 77, 0.12);
+    border-color: rgba(255, 184, 77, 0.45);
+    color: var(--color-warning);
+  }
+  .score-pill.score-bad {
+    background: rgba(255, 77, 106, 0.12);
+    border-color: rgba(255, 77, 106, 0.45);
+    color: var(--color-error);
+  }
+
+  .score-value { color: inherit; }
+  .score-total { color: inherit; opacity: 0.6; font-weight: 400; }
 
   .summary-label {
     font-size: 0.9rem;
