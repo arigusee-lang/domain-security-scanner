@@ -26,6 +26,9 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/dn-sec/data
 ProtectHome=true
+# Private writable /tmp — ProtectSystem=strict makes the real /tmp read-only,
+# and tsx needs a writable temp dir for its IPC socket.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
