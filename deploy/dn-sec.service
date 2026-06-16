@@ -1,18 +1,25 @@
 [Unit]
-Description=DN-Sec Domain Security Checker
-After=network.target
+Description=Domain Security Scanner (dn-sec)
+After=network.target redis-server.service
+Wants=redis-server.service
 
 [Service]
 Type=simple
 User=dn-sec
 Group=dn-sec
 WorkingDirectory=/opt/dn-sec
-ExecStart=/usr/bin/npx tsx server/index.ts
+# Run the server via the locally-installed tsx binary (no npx — avoids a home-dir
+# lookup that ProtectHome would block).
+ExecStart=/opt/dn-sec/node_modules/.bin/tsx server/index.ts
 Restart=always
 RestartSec=5
 
-# Load env vars from file (secrets live here, not in git)
+# Secrets + config live here (not in git).
 EnvironmentFile=/opt/dn-sec/.env
+
+# Allow binding to port 80 while still running as the unprivileged dn-sec user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 # Hardening
 NoNewPrivileges=true

@@ -1,82 +1,67 @@
 #!/bin/bash
-# One-time VM setup script for GCE e2-micro
-# Run as root: sudo bash deploy/setup-vm.sh
-set -e
+# One-time VM setup for the Domain Security Scanner on a GCE e2-micro.
+# SQLite + Redis run co-located on this same host (no Docker).
+# Run as root:  curl -fsSL <raw setup-vm.sh> | sudo bash
+#           or: sudo bash deploy/setup-vm.sh
+set -euo pipefail
 
-echo "=== Setting up DN-Sec on GCE VM ==="
+APP_DIR=/opt/dn-sec
+REPO=https://github.com/arigusee-lang/domain-security-scanner.git
 
-# 1. Install Node.js 20
+echo "=== Domain Security Scanner — VM setup ==="
+
+# 0. Swap — e2-micro has only 1 GB RAM, not enough for `vite build` + Node.
+#    A 2 GB swapfile prevents OOM kills during build and under load.
+if [ ! -f /swapfile ]; then
+  echo ">>> Creating 2 GB swapfile"
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# 1. System deps: Node 20, git, and Redis (co-located).
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs git
+apt-get install -y nodejs git redis-server
 
-# 2. Create app user
+# 2. Redis — bound to localhost by default; enable + start.
+systemctl enable redis-server
+systemctl restart redis-server
+
+# 3. Dedicated service user.
 useradd --system --create-home --shell /bin/bash dn-sec || true
 
-# 3. Clone repo (or set up for pull-based deploy)
-if [ ! -d /opt/dn-sec ]; then
-  git clone https://github.com/YOUR_USERNAME/security.txt.git /opt/dn-sec
-  chown -R dn-sec:dn-sec /opt/dn-sec
+# 4. Clone (or fast-forward) the repo.
+if [ ! -d "$APP_DIR/.git" ]; then
+  git clone "$REPO" "$APP_DIR"
+else
+  git -C "$APP_DIR" fetch origin && git -C "$APP_DIR" reset --hard origin/main
 fi
+chown -R dn-sec:dn-sec "$APP_DIR"
 
-# 4. Create data directory for SQLite
-mkdir -p /opt/dn-sec/data
-chown dn-sec:dn-sec /opt/dn-sec/data
+# 5. SQLite data directory.
+mkdir -p "$APP_DIR/data"
+chown dn-sec:dn-sec "$APP_DIR/data"
 
-# 5. Create .env file (fill in secrets manually after setup)
-if [ ! -f /opt/dn-sec/.env ]; then
-  cat > /opt/dn-sec/.env << 'EOF'
-# Production secrets — fill these in manually
-NODE_ENV=production
-PORT=8080
-DB_DIR=/opt/dn-sec/data
-APP_URL=https://dn-sec.com
-
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=https://dn-sec.com/api/auth/google/callback
-
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-GITHUB_REDIRECT_URI=https://dn-sec.com/api/auth/github/callback
-
-RESEND_API_KEY=
-FROM_EMAIL=notifications@dn-sec.com
-
-# Logging
-LOG_LEVEL=info
-# Axiom (optional) — vendor-neutral log aggregator, 500 GB/mo free tier.
-# Create dataset at https://app.axiom.co/ and an ingest token, then fill in below.
-# Leave empty to log only to stdout (captured by journalctl).
-AXIOM_DATASET=
-AXIOM_TOKEN=
-EOF
-  chown dn-sec:dn-sec /opt/dn-sec/.env
-  chmod 600 /opt/dn-sec/.env
-  echo ">>> IMPORTANT: Edit /opt/dn-sec/.env and fill in your secrets!"
-fi
-
-# 6. Install dependencies and build
-cd /opt/dn-sec
-sudo -u dn-sec npm ci --legacy-peer-deps
+# 6. Install deps + build the frontend.
+#    PDF export is disabled on this deployment, so skip the Chromium download
+#    (~150 MB) that puppeteer would otherwise fetch on install.
+cd "$APP_DIR"
+sudo -u dn-sec env PUPPETEER_SKIP_DOWNLOAD=true npm ci --legacy-peer-deps
 sudo -u dn-sec npm run build
 
-# 7. Install systemd service
-cp /opt/dn-sec/deploy/dn-sec.service /etc/systemd/system/
+# 7. systemd service.
+cp "$APP_DIR/deploy/dn-sec.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable dn-sec
-systemctl start dn-sec
-
-# 8. Set up daily SQLite backup to GCS (optional)
-cat > /etc/cron.d/dn-sec-backup << 'CRON'
-# Backup SQLite to GCS every 6 hours
-0 */6 * * * dn-sec gsutil cp /opt/dn-sec/data/app.db gs://YOUR_BUCKET/backups/app-$(date +\%Y\%m\%d-\%H\%M).db 2>/dev/null || true
-CRON
 
 echo ""
-echo "=== Setup complete ==="
-echo "1. Edit /opt/dn-sec/.env with your secrets"
-echo "2. Point Cloudflare DNS A record to this VM's IP"
-echo "3. In Cloudflare, set SSL mode to 'Flexible' (Cloudflare handles SSL)"
-echo "4. Restart: sudo systemctl restart dn-sec"
-echo "5. Check: sudo systemctl status dn-sec"
-echo "6. Logs: sudo journalctl -u dn-sec -f"
+echo "=== Base setup complete ==="
+echo "Next:"
+echo "  1. Put the production env file at $APP_DIR/.env (chown dn-sec, chmod 600)"
+echo "  2. Start:   sudo systemctl restart dn-sec"
+echo "  3. Status:  sudo systemctl status dn-sec"
+echo "  4. Logs:    sudo journalctl -u dn-sec -f"
+echo "  5. Point Cloudflare A record for dn-sec.com at this VM's external IP (proxied),"
+echo "     and set SSL/TLS mode to 'Flexible'."

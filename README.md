@@ -1,38 +1,42 @@
-# security.txt Validator
+# Domain Security Scanner
 
-A web tool for validating, generating, and auto-correcting `security.txt` files per [RFC 9116](https://www.rfc-editor.org/rfc/rfc9116).
+A web tool that scans a domain's security posture across DNS, email, TLS, web, and
+reputation signals, scores it, and tracks changes over time.
 
-`security.txt` is a standard that allows website owners to describe their vulnerability disclosure practices. Learn more at [securitytxt.org](https://securitytxt.org/).
+Enter a domain and the scanner runs a battery of checks, streaming results as each
+completes, then renders a scored report with remediation guidance.
+
+## Checks
+
+- **TLS/SSL** — certificate validity, expiry, issuer, chain
+- **Security headers** — HSTS, CSP, X-Frame-Options, and friends
+- **Email auth** — SPF, DMARC, DKIM
+- **DNS** — DNSSEC, CAA, nameservers, MX, dangling-DNS detection
+- **Certificate Transparency** — CT-log certificate discovery and findings
+- **Reputation** — Google Safe Browsing, URLhaus, DNSBL blacklists
+- **Domain expiry** — registration expiry via RDAP/WHOIS
+- **Redirects** — HTTP→HTTPS and redirect-chain hygiene
+- **security.txt** — RFC 9116 presence and validation
+- **SEO** — basic indexability signals
 
 ## Features
 
-- **Validate** — paste content or drag-and-drop a `.txt` file to get line-by-line errors and warnings with RFC references
-- **Fetch by domain** — enter a domain name and the tool fetches `security.txt` via an SSRF-protected proxy, checking both content and hosting configuration (Content-Type, location, redirects)
-- **Generate** — fill in a form to build a valid file with live preview, copy, and download
-- **Auto-correct** — a corrected version is generated automatically (missing fields inserted, URI schemes fixed, expired dates replaced)
-- **PGP ClearSign** — correctly detects signed files and extracts content from the PGP wrapper
+- **Live streaming results** (SSE) — sections render as each check finishes
+- **Accounts** — Google / GitHub OAuth (Lucia)
+- **Scan history & diffing** — see what changed between scans
+- **Batch scans** — check many domains at once
+- **Scheduled monitoring** — recurring scans with alerting (BullMQ + Redis)
+- **Webhooks** and **report export** (HTML / CSV)
 - **Dark / light theme**
-
-## Validation Rules
-
-| Rule | Severity | Description |
-|---|---|---|
-| Required fields | error | Contact and Expires must be present |
-| Expires format | error | Must be a valid RFC 3339 date-time, not in the past |
-| URI schemes | error | Contact: `mailto:` / `https:` / `tel:`, others: `https:` |
-| Line syntax | error | Every line must be a field, comment, or blank |
-| Preferred-Languages | error | Must contain valid BCP 47 tags |
-| Unknown fields | warning | Fields not defined by RFC 9116 |
-| Expiry window | warning | Less than 30 days or more than 365 days until expiry |
-| Content-Type | warning | Must be `text/plain` (fetch mode) |
-| File location | warning | `/.well-known/security.txt` is recommended (fetch mode) |
-| PGP signature | info | ClearSign wrapper detection and structure check |
 
 ## Tech Stack
 
 - **Frontend**: Svelte 4, TypeScript, Vite
-- **Backend**: Express, Node.js (SSRF-protected proxy)
-- **Tests**: Vitest (124 tests)
+- **Backend**: Express, Node.js (run via `tsx`), SSRF-protected fetch proxy
+- **Storage**: SQLite (better-sqlite3)
+- **Queue / cache**: Redis + BullMQ (degrades gracefully if absent)
+- **Auth**: Lucia + Arctic (OAuth)
+- **Tests**: Vitest
 
 ## Getting Started
 
@@ -40,23 +44,32 @@ A web tool for validating, generating, and auto-correcting `security.txt` files 
 # Install dependencies
 npm install
 
-# Development (frontend + backend)
+# Copy env and fill in values
+cp .env.example .env.local
+
+# Development (two processes)
 npm run dev      # Vite dev server on :5173
-npm run server   # Express proxy on :3001
+npm run server   # Express API on :3001
 
 # Run tests
 npm test
 
-# Production
+# Production (serves built frontend + API on one port)
 npm run build
-npm start        # Serves built frontend + API on :3001
+npm start
 ```
 
-## Links
+See [.env.example](.env.example) for all configuration. External-API keys
+(Safe Browsing, URLhaus, CertSpotter, Resend) are optional — checks degrade
+gracefully without them.
 
-- [RFC 9116 — A File Format to Aid in Security Vulnerability Disclosure](https://www.rfc-editor.org/rfc/rfc9116)
-- [securitytxt.org](https://securitytxt.org/)
-- [RFC 4880 — OpenPGP (ClearSign)](https://www.rfc-editor.org/rfc/rfc4880#section-7)
+## Deployment
+
+Deployed to a single GCE `e2-micro` VM with SQLite and Redis co-located on the
+same host, behind Cloudflare (proxied DNS, Flexible TLS). See [deploy/](deploy/):
+
+- [deploy/setup-vm.sh](deploy/setup-vm.sh) — one-time VM provisioning
+- [deploy/dn-sec.service](deploy/dn-sec.service) — systemd unit
 
 ## License
 
