@@ -53,6 +53,13 @@ const isProduction = process.env.NODE_ENV === "production";
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 
+// Behind Cloudflare in production: trust exactly one proxy hop so req.ip and the
+// rate limiter use the real client IP from X-Forwarded-For (not Cloudflare's edge
+// IP). Safe because the origin firewall only admits Cloudflare's IP ranges.
+if (isProduction) {
+  app.set("trust proxy", 1);
+}
+
 // ── Initialize SQLite database ──
 const db = initDatabase();
 
