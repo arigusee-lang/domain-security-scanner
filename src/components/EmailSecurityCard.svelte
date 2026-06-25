@@ -20,31 +20,27 @@
   // hasMail flag comes from server; fall back to record count for older payloads.
   $: noMail = mx.hasMail === false || mx.records.length === 0 || !!mx.nullMx;
 
-  $: overall = noMail
-    ? 'info' as CheckStatus
-    : worst(spf.status, dmarc.status, dkim.status, mx.status);
+  // The card has two independent halves: outbound (anti-spoofing: SPF/DMARC/DKIM)
+  // and inbound (mail delivery: MX). Outbound posture is meaningful even for a
+  // send-only domain, so it always drives the overall status — receiving is only
+  // folded in when the domain actually accepts mail (otherwise it's informational).
+  $: outboundStatus = worst(spf.status, dmarc.status, dkim.status);
+  $: overall = noMail ? outboundStatus : worst(outboundStatus, mx.status);
+
+  $: outboundSummary = [
+    spf.record ? `SPF: ${spf.status}` : 'No SPF',
+    dmarc.record ? `DMARC: ${dmarc.status}` : 'No DMARC',
+    `DKIM: ${dkim.foundCount}/${dkim.totalChecked}`,
+  ].join(' · ');
 
   $: subtitle = noMail
-    ? (mx.nullMx ? 'Domain rejects email (Null MX)' : 'Domain does not accept email')
-    : [
-        spf.record ? `SPF: ${spf.status}` : 'No SPF',
-        dmarc.record ? `DMARC: ${dmarc.status}` : 'No DMARC',
-        `DKIM: ${dkim.foundCount}/${dkim.totalChecked}`,
-      ].join(' · ');
+    ? `${outboundSummary} · ${mx.nullMx ? 'Rejects inbound mail' : 'No inbound mail'}`
+    : outboundSummary;
 </script>
 
 <ResultCard title="Email Security" status={overall} {subtitle}>
-  {#if noMail}
-    <div class="no-mail-banner" role="note">
-      <strong>This domain does not appear to accept email.</strong>
-      {#if mx.nullMx}
-        It publishes a Null MX record (RFC 7505), which explicitly tells senders to reject any mail addressed here.
-      {:else}
-        No MX records were found, so no mail server is configured.
-      {/if}
-      SPF and DMARC are still useful for preventing spoofing of the domain in outbound mail.
-    </div>
-  {/if}
+  <!-- ── Outbound: anti-spoofing (SPF / DMARC / DKIM) ── -->
+  <p class="group-label">Outbound — anti-spoofing</p>
 
   <!-- SPF -->
   <section class="sub-section">
@@ -136,10 +132,9 @@
     {/if}
   </section>
 
-  <!-- DKIM -->
-  {#if !noMail}
-    <section class="sub-section">
-      <h4 class="sub-title"><CheckStatusIcon status={dkim.status} /> DKIM</h4>
+  <!-- DKIM — outbound signing, relevant even for send-only domains -->
+  <section class="sub-section">
+    <h4 class="sub-title"><CheckStatusIcon status={dkim.status} /> DKIM</h4>
       <p class="dkim-summary">{dkim.foundCount} of {dkim.totalChecked} common selectors found</p>
       <button class="toggle-btn" on:click={() => showDkimSelectors = !showDkimSelectors}>
         {showDkimSelectors ? 'Hide' : 'Show'} selectors
@@ -159,34 +154,52 @@
       <p class="dkim-note">Partial check — common selectors only. Custom selectors may exist.
         <a class="ref-link" href="https://www.rfc-editor.org/rfc/rfc6376" target="_blank" rel="noopener noreferrer">RFC 6376 <svg class="ext-icon" width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M3.5 1H11V8.5M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
       </p>
-    </section>
-  {/if}
+  </section>
 
-  <!-- MX -->
-  {#if !noMail}
-    <section class="sub-section">
-      <h4 class="sub-title"><CheckStatusIcon status={mx.status} /> MX Records</h4>
-      {#if mx.nullMx}
-        <p class="no-data">Null MX record present (priority 0, target <code>.</code>) — domain explicitly rejects incoming email per RFC 7505.</p>
-      {:else if mx.records.length > 0}
-        <div class="mx-table-wrap">
-          <table class="mx-table">
-            <thead><tr><th>Priority</th><th>Target</th></tr></thead>
-            <tbody>
-              {#each mx.records as r}
-                <tr><td>{r.priority}</td><td>{r.exchange}</td></tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {:else}
-        <p class="no-data">No MX records found — domain likely does not receive email.</p>
-      {/if}
-    </section>
-  {/if}
+  <!-- ── Inbound: mail delivery (MX) ── -->
+  <p class="group-label">Inbound — mail delivery</p>
+
+  <section class="sub-section">
+    <h4 class="sub-title"><CheckStatusIcon status={noMail ? 'info' : mx.status} /> MX Records</h4>
+    {#if mx.nullMx}
+      <div class="no-mail-banner" role="note">
+        <strong>This domain rejects incoming email.</strong>
+        It publishes a Null MX record (RFC 7505), which explicitly tells senders not to deliver mail here.
+        That doesn't affect outbound mail — SPF, DKIM and DMARC above still protect the domain from spoofing.
+      </div>
+    {:else if mx.records.length > 0}
+      <div class="mx-table-wrap">
+        <table class="mx-table">
+          <thead><tr><th>Priority</th><th>Target</th></tr></thead>
+          <tbody>
+            {#each mx.records as r}
+              <tr><td>{r.priority}</td><td>{r.exchange}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else}
+      <div class="no-mail-banner" role="note">
+        <strong>This domain does not accept incoming email.</strong>
+        No MX records were found, so no mail server is configured to receive mail at this domain.
+        This is expected for a send-only domain — SPF, DKIM and DMARC above still protect its outbound mail from spoofing.
+      </div>
+    {/if}
+  </section>
 </ResultCard>
 
 <style>
+  .group-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+    opacity: 0.7;
+    margin: 0.4rem 0 0.1rem;
+    padding-top: 0.5rem;
+  }
+  .group-label:first-child { padding-top: 0; }
   .sub-section { padding: 0.7rem 0; border-bottom: 1px solid var(--color-border); }
   .sub-section:last-child { border-bottom: none; padding-bottom: 0; }
   .sub-title { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; font-weight: 600; color: var(--color-text); margin-bottom: 0.5rem; }
