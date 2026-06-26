@@ -22,7 +22,6 @@ import type {
   SecurityTxtSection,
   CtLogsResult,
   RedirectResult,
-  SeoResult,
   SafeBrowsingResult,
   UrlhausResult,
   DanglingDnsResult,
@@ -61,7 +60,6 @@ export interface ReportData {
   expiry: DomainExpiryResult | null;
   ct: CtLogsResult | null;
   redirects: RedirectResult | null;
-  seo: SeoResult | null;
   reputation: { safeBrowsing?: SafeBrowsingResult; urlhaus?: UrlhausResult } | null;
 }
 
@@ -451,34 +449,27 @@ function renderEmailCard(opts: {
   const { spf, dmarc, dkim, mx } = opts;
   const noMail = !!(mx && (mx.hasMail === false || mx.records.length === 0 || mx.nullMx));
 
-  const overall = noMail
-    ? ("info" as CheckStatus)
-    : worst(
-        spf?.status || "info",
-        dmarc?.status || "info",
-        dkim?.status || "info",
-        mx?.status || "info",
-      );
+  // Two halves: outbound (SPF/DMARC/DKIM anti-spoofing) and inbound (MX delivery).
+  // Outbound posture always drives the status; inbound only folds in when the
+  // domain actually accepts mail. Mirrors EmailSecurityCard.svelte.
+  const outboundStatus = worst(
+    spf?.status || "info",
+    dmarc?.status || "info",
+    dkim?.status || "info",
+  );
+  const overall = noMail ? outboundStatus : worst(outboundStatus, mx?.status || "info");
+
+  const outboundSummary = [
+    spf?.record ? `SPF: ${spf.status}` : "No SPF",
+    dmarc?.record ? `DMARC: ${dmarc.status}` : "No DMARC",
+    dkim ? `DKIM: ${dkim.foundCount}/${dkim.totalChecked}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const subtitle = noMail
-    ? mx?.nullMx
-      ? "Domain rejects email (Null MX)"
-      : "Domain does not accept email"
-    : [
-        spf?.record ? `SPF: ${spf.status}` : "No SPF",
-        dmarc?.record ? `DMARC: ${dmarc.status}` : "No DMARC",
-        dkim ? `DKIM: ${dkim.foundCount}/${dkim.totalChecked}` : "",
-      ]
-        .filter(Boolean)
-        .join(" · ");
-
-  const noMailBanner = noMail
-    ? `<div class="callout"><strong>This domain does not appear to accept email.</strong> ${
-        mx?.nullMx
-          ? "It publishes a Null MX record (RFC 7505), which explicitly tells senders to reject any mail addressed here."
-          : "No MX records were found, so no mail server is configured."
-      } SPF and DMARC are still useful for preventing spoofing of the domain in outbound mail.</div>`
-    : "";
+    ? `${outboundSummary} · ${mx?.nullMx ? "Rejects inbound mail" : "No inbound mail"}`
+    : outboundSummary;
 
   const spfHtml = spf
     ? `<div class="sub-section">
@@ -538,8 +529,8 @@ function renderEmailCard(opts: {
       </div>`
     : "";
 
-  // DKIM and MX are hidden for no-mail domains — mirrors EmailSecurityCard.svelte.
-  const dkimHtml = dkim && !noMail
+  // DKIM is outbound signing — relevant even for send-only domains.
+  const dkimHtml = dkim
     ? `<div class="sub-section">
         <h4 class="sub-title">${statusIcon(dkim.status)} DKIM</h4>
         <p class="muted">${dkim.foundCount} of ${dkim.totalChecked} common selectors found</p>
@@ -555,23 +546,28 @@ function renderEmailCard(opts: {
       </div>`
     : "";
 
-  const mxHtml = mx && !noMail
+  const mxHtml = mx
     ? `<div class="sub-section">
-        <h4 class="sub-title">${statusIcon(mx.status)} MX Records</h4>
+        <h4 class="sub-title">${statusIcon(noMail ? "info" : mx.status)} MX Records</h4>
         ${
-          mx.records.length > 0
-            ? `<div class="table-wrap">
+          mx.nullMx
+            ? `<div class="callout"><strong>This domain rejects incoming email.</strong> It publishes a Null MX record (RFC 7505), which explicitly tells senders not to deliver mail here. That doesn't affect outbound mail — SPF, DKIM and DMARC above still protect the domain from spoofing.</div>`
+            : mx.records.length > 0
+              ? `<div class="table-wrap">
                 <table class="mx-table">
                   <thead><tr><th>Priority</th><th>Target</th></tr></thead>
                   <tbody>${mx.records.map((r) => `<tr><td>${esc(String(r.priority))}</td><td>${esc(r.exchange)}</td></tr>`).join("")}</tbody>
                 </table>
               </div>`
-            : `<p class="muted">No MX records found — domain likely does not receive email.</p>`
+              : `<div class="callout"><strong>This domain does not accept incoming email.</strong> No MX records were found, so no mail server is configured to receive mail at this domain. This is expected for a send-only domain — SPF, DKIM and DMARC above still protect its outbound mail from spoofing.</div>`
         }
       </div>`
     : "";
 
-  return cardShell("Email Security", overall, subtitle, `${noMailBanner}${spfHtml}${dmarcHtml}${dkimHtml}${mxHtml}`);
+  const outboundGroup = `<p class="group-label">Outbound — anti-spoofing</p>${spfHtml}${dmarcHtml}${dkimHtml}`;
+  const inboundGroup = mx ? `<p class="group-label">Inbound — mail delivery</p>${mxHtml}` : "";
+
+  return cardShell("Email Security", overall, subtitle, `${outboundGroup}${inboundGroup}`);
 }
 
 function renderReputationCard(opts: {
@@ -732,17 +728,6 @@ function renderCtCard(data: CtLogsResult, domain: string): string {
   );
 }
 
-function renderSeoCard(data: SeoResult): string {
-  const passCount = data.items.filter((i) => i.status === "pass").length;
-  const subtitle = data.items.length > 0 ? `${passCount} of ${data.items.length} checks passed` : "";
-
-  const body = data.error
-    ? `<p class="error-text">${esc(data.error)}</p>`
-    : `<div class="check-list">${data.items.map((i) => renderCheckItem(i.status, i.check, i.detail)).join("")}</div>`;
-
-  return cardShell("SEO Basics", data.status, subtitle, body);
-}
-
 // ── Building blocks ─────────────────────────────────────────────────────────
 
 function renderCheckItem(status: CheckStatus, title: string, detail: string): string {
@@ -775,26 +760,68 @@ function isNoMail(data: ReportData): boolean {
   return mx.hasMail === false || mx.records.length === 0 || !!mx.nullMx;
 }
 
+function worstOfStatuses(...statuses: Array<CheckStatus | undefined | null>): CheckStatus {
+  const order: Record<CheckStatus, number> = { fail: 3, warn: 2, pass: 1, info: 0 };
+  let worst: CheckStatus = "info";
+  for (const s of statuses) {
+    if (!s) continue;
+    if (order[s] > order[worst]) worst = s;
+  }
+  return worst;
+}
+
 function renderSummaryBar(data: ReportData): string {
   const noMail = isNoMail(data);
 
-  // Mirror DomainCheckerPage.svelte#summaryChecks: drop SPF/DMARC for domains
-  // that don't accept email (so the bar doesn't penalize a no-mail domain for
-  // missing email auth records).
-  const checks: { status: CheckStatus }[] = [];
-  if (data.web?.securityTxt) checks.push({ status: data.web.securityTxt.status });
-  if (data.web?.headers?.items?.length) checks.push({ status: data.web.headers.status });
-  if (data.dns?.spf && !noMail) checks.push({ status: data.dns.spf.status });
-  if (data.dns?.dmarc && !noMail) checks.push({ status: data.dns.dmarc.status });
-  if (data.dns?.dnssec) checks.push({ status: data.dns.dnssec.status });
-  if (data.web?.ssl) checks.push({ status: data.web.ssl.status });
-  if (data.redirects) checks.push({ status: data.redirects.status });
-  if (data.dns?.blacklist) checks.push({ status: data.dns.blacklist.status });
+  // Mirror DomainCheckerPage.svelte: one entry per visible card, status =
+  // worst of internal sub-checks. Counts match what the user sees on the page.
+  const checks: { label: string; status: CheckStatus }[] = [];
+  if (data.web?.headers?.items?.length) {
+    checks.push({ label: "Headers", status: data.web.headers.status });
+  }
+  if (data.dns?.dnssec || data.dns?.caa || data.dns?.ns || data.dns?.danglingDns || data.expiry) {
+    checks.push({
+      label: "DNS & Domain",
+      status: worstOfStatuses(
+        data.dns?.dnssec?.status,
+        data.dns?.caa?.status,
+        data.dns?.ns?.status,
+        data.dns?.danglingDns?.status,
+        data.expiry?.status,
+      ),
+    });
+  }
+  if (data.reputation?.safeBrowsing || data.reputation?.urlhaus || data.dns?.blacklist) {
+    checks.push({
+      label: "Reputation",
+      status: worstOfStatuses(
+        data.reputation?.safeBrowsing?.status,
+        data.reputation?.urlhaus?.status,
+        data.dns?.blacklist?.status,
+      ),
+    });
+  }
+  if (data.dns?.spf || data.dns?.dmarc || data.dns?.dkim || data.dns?.mx) {
+    // Outbound anti-spoofing (SPF/DMARC/DKIM) drives the Email status; inbound
+    // (MX) only folds in when the domain accepts mail. Mirrors renderEmailCard.
+    const outbound = worstOfStatuses(
+      data.dns?.spf?.status,
+      data.dns?.dmarc?.status,
+      data.dns?.dkim?.status,
+    );
+    checks.push({
+      label: "Email",
+      status: noMail ? outbound : worstOfStatuses(outbound, data.dns?.mx?.status),
+    });
+  }
+  if (data.web?.securityTxt) checks.push({ label: "security.txt", status: data.web.securityTxt.status });
+  if (data.web?.ssl) checks.push({ label: "SSL/TLS", status: data.web.ssl.status });
+  if (data.ct) checks.push({ label: "CT logs", status: data.ct.status });
+  if (data.redirects) checks.push({ label: "Redirects", status: data.redirects.status });
 
   if (checks.length === 0) return "";
 
-  // Match SummaryBar.svelte: info checks are excluded from the bar entirely
-  // (counts and progress bar). Total is pass+warn+fail.
+  // Info entries excluded from counts/progress (match SummaryBar.svelte).
   const passCount = checks.filter((c) => c.status === "pass").length;
   const warnCount = checks.filter((c) => c.status === "warn").length;
   const failCount = checks.filter((c) => c.status === "fail").length;
@@ -809,6 +836,17 @@ function renderSummaryBar(data: ReportData): string {
       : overallStatus === "fail"
         ? `${failCount} issue${failCount !== 1 ? "s" : ""} found`
         : `${warnCount} warning${warnCount !== 1 ? "s" : ""}`;
+
+  const failedLabels = checks.filter((c) => c.status === "fail").map((c) => c.label);
+  const warnLabels = checks.filter((c) => c.status === "warn").map((c) => c.label);
+
+  const troubleList =
+    failedLabels.length === 0 && warnLabels.length === 0
+      ? ""
+      : `<div class="trouble-list">
+          ${failedLabels.length > 0 ? `<span class="trouble-label count-fail">Failed:</span><span>${esc(failedLabels.join(", "))}</span>` : ""}
+          ${warnLabels.length > 0 ? `<span class="trouble-label count-warn">Warnings:</span><span>${esc(warnLabels.join(", "))}</span>` : ""}
+        </div>`;
 
   const score = data.score ? Math.ceil(data.score.total) : null;
   const scoreClass = score === null ? "" : score >= 90 ? "score-good" : score >= 70 ? "score-warn" : "score-bad";
@@ -829,6 +867,7 @@ function renderSummaryBar(data: ReportData): string {
       ${warnCount > 0 ? `<div class="seg warn-seg" style="width: ${(warnCount / total) * 100}%"></div>` : ""}
       ${failCount > 0 ? `<div class="seg fail-seg" style="width: ${(failCount / total) * 100}%"></div>` : ""}
     </div>
+    ${troubleList}
   </div>`;
 }
 
@@ -997,6 +1036,8 @@ const STYLES = `
   .pass-seg { background: var(--valid); }
   .warn-seg { background: var(--warning); }
   .fail-seg { background: var(--error); }
+  .trouble-list { display: flex; flex-wrap: wrap; gap: 0.3rem 0.75rem; margin-top: 0.5rem; font-size: 0.72rem; color: var(--text-2); }
+  .trouble-label { font-weight: 600; margin-right: 0.25rem; }
 
   /* Section ("card") — no box, just a header + content with a horizontal
      rule between sections. Lets long sections flow naturally across pages
@@ -1020,6 +1061,8 @@ const STYLES = `
   .sub-section { padding: 0.45rem 0; }
   .sub-section + .sub-section { border-top: 1px dashed var(--border); }
   .sub-title { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.35rem; page-break-after: avoid; break-after: avoid; }
+  .group-label { font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); opacity: 0.7; margin: 0.5rem 0 0.1rem; page-break-after: avoid; break-after: avoid; }
+  .group-label:first-child { margin-top: 0; }
   .sub-title.small { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); margin-top: 0.5rem; }
 
   .muted { color: var(--text-2); font-size: 0.8rem; line-height: 1.5; }
@@ -1356,7 +1399,6 @@ export function buildReportHtml(data: ReportData): string {
     );
   }
 
-  if (data.seo) cards.push(renderSeoCard(data.seo));
 
   return `<!DOCTYPE html>
 <html lang="en">
